@@ -22,7 +22,13 @@ The package stays narrow on purpose. It does not implement finite-size DMRG or m
 
 ## Installation
 
-From a Julia REPL:
+`InfiniteTEBD` is **awaiting registration** in Julia's General registry. Until that lands, install it directly from GitHub:
+
+```julia
+pkg> add https://github.com/jayren3996/InfiniteTEBD.jl
+```
+
+After it is registered, the standard by-name install will work too (**not available yet**):
 
 ```julia
 pkg> add InfiniteTEBD
