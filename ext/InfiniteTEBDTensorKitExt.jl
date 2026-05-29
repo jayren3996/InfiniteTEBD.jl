@@ -1,6 +1,6 @@
-module iTEBDTensorKitExt
+module InfiniteTEBDTensorKitExt
 
-using iTEBD
+using InfiniteTEBD
 using TensorKit
 using LinearAlgebra
 using KrylovKit: eigsolve
@@ -8,11 +8,11 @@ using KrylovKit: eigsolve
 # Names from the base package that this extension will specialise. Using
 # `import` (not `using`) so that adding methods to these names is unambiguous
 # to the compiler.
-import iTEBD: graded_space, spin_half_ops, schmidt_values
-import iTEBD: rand_iMPS, product_iMPS
-import iTEBD: iMPS, _validate_iMPS_bonds, _bond_dim
-import iTEBD: canonical!
-import iTEBD: _resolve_svd_min, _validate_truncation_args, adaptive_bonddim
+import InfiniteTEBD: graded_space, spin_half_ops, schmidt_values
+import InfiniteTEBD: rand_iMPS, product_iMPS
+import InfiniteTEBD: iMPS, _validate_iMPS_bonds, _bond_dim
+import InfiniteTEBD: canonical!
+import InfiniteTEBD: _resolve_svd_min, _validate_truncation_args, adaptive_bonddim
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Chunk 3: Helper layer
@@ -77,7 +77,7 @@ graded_space(sym::Symbol, args...) = graded_space(Val(sym), args...)
 # `SymmetricIMPS` — the TensorKit-backed variant of `iMPS`. The narrow type
 # parameters constrain it to symmetric tensors only; dense `Array`-backed
 # states do NOT satisfy this alias. Available as
-# `Base.get_extension(iTEBD, :iTEBDTensorKitExt).SymmetricIMPS` from user code,
+# `Base.get_extension(InfiniteTEBD, :InfiniteTEBDTensorKitExt).SymmetricIMPS` from user code,
 # and unqualified as `SymmetricIMPS` inside the extension's own methods.
 const SymmetricIMPS = iMPS{<:AbstractTensorMap, <:DiagonalTensorMap}
 
@@ -395,8 +395,8 @@ two-site block after applying a gate. It is also exercised directly by the
 `canonical!` implementation when grouping the unit cell.
 """
 function _symmetric_tsvd(A::AbstractTensorMap;
-                         maxdim::Integer=iTEBD.MAXDIM,
-                         cutoff::Real=iTEBD.SVDTOL)
+                         maxdim::Integer=InfiniteTEBD.MAXDIM,
+                         cutoff::Real=InfiniteTEBD.SVDTOL)
     # Repartition: codomain (V_left, P_1), domain (P_2, V_right).
     # In TensorKit 0.16 this is `permute(A, ((1, 2), (3, 4)))`.
     B = permute(A, ((1, 2), (3, 4)))
@@ -557,7 +557,7 @@ end
 # Block-wise pseudo-inverse square root: M^{-1/2}, zeroing eigenvalues below a
 # per-block tolerance. The tolerance threshold is `cutoff * max(|eigenvalues|)`
 # so that the user-supplied truncation cutoff is respected.
-function _block_isqrt(M::AbstractTensorMap; cutoff::Real=iTEBD.SVDTOL)
+function _block_isqrt(M::AbstractTensorMap; cutoff::Real=InfiniteTEBD.SVDTOL)
     out = similar(M)
     for (sector, blk) in blocks(M)
         H = (Matrix(blk) + Matrix(blk)') / 2
@@ -624,8 +624,8 @@ Keyword arguments:
   proceeds silently.
 """
 function canonical!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap};
-                    maxdim::Integer=iTEBD.MAXDIM,
-                    cutoff::Real=iTEBD.SVDTOL,
+                    maxdim::Integer=InfiniteTEBD.MAXDIM,
+                    cutoff::Real=InfiniteTEBD.SVDTOL,
                     renormalize::Bool=true,
                     tol::Real=1e-12,
                     maxiter::Integer=200,
@@ -872,7 +872,7 @@ end
 # The threshold for zeroing small entries is `cutoff * max(|entries|)` so that
 # the user-supplied truncation cutoff is respected (rather than a hardcoded
 # sqrt(eps) ≈ 1.5e-8 that silently discards modes the user asked to keep).
-function _diag_inverse(λ::DiagonalTensorMap; cutoff::Real=iTEBD.SVDTOL)
+function _diag_inverse(λ::DiagonalTensorMap; cutoff::Real=InfiniteTEBD.SVDTOL)
     out = similar(λ)
     # Compute the global max absolute value across all blocks for the threshold.
     global_max = 0.0
@@ -906,7 +906,7 @@ end
 # sectors). Specialising this internal hook avoids piracy on `Base.length`.
 _bond_dim(λ::DiagonalTensorMap) = dim(domain(λ)[1])
 
-import iTEBD: applygate!
+import InfiniteTEBD: applygate!
 
 """
     applygate!(ψ::SymmetricIMPS, G::AbstractTensorMap, i::Integer, j::Integer;
@@ -938,7 +938,7 @@ state is re-canonicalised after each wrap gate and observables stay accurate.
 """
 function applygate!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap},
                     G::AbstractTensorMap, i::Integer, j::Integer;
-                    maxdim::Integer=iTEBD.MAXDIM,
+                    maxdim::Integer=InfiniteTEBD.MAXDIM,
                     mindim::Integer=1,
                     truncerr::Real=0.0,
                     cutoff::Union{Nothing,Real}=nothing,
@@ -1044,7 +1044,7 @@ end
 # Chunk 7: Symmetric observables
 # ─────────────────────────────────────────────────────────────────────────────
 
-import iTEBD: ent_S, entanglement_entropy, expect, energy_density
+import InfiniteTEBD: ent_S, entanglement_entropy, expect, energy_density
 
 """
     ent_S(ψ::SymmetricIMPS, i::Integer)

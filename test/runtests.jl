@@ -1,5 +1,5 @@
 using Test
-using iTEBD
+using InfiniteTEBD
 
 const TEST_ROOT = @__DIR__
 
@@ -94,9 +94,9 @@ end
 const REQUESTED_GROUPS = isempty(ARGS) ? _requested_test_groups() : String["ARGS"]
 const REQUESTED_FILES = isempty(ARGS) ? _selected_test_files(REQUESTED_GROUPS) : _selected_test_files_from_args(ARGS)
 
-@info "Running iTEBD test groups" groups=REQUESTED_GROUPS files=REQUESTED_FILES
+@info "Running InfiniteTEBD test groups" groups=REQUESTED_GROUPS files=REQUESTED_FILES
 
-@testset "iTEBD.jl" begin
+@testset "InfiniteTEBD.jl" begin
     for file in REQUESTED_FILES
         @testset "$file" begin
             include(joinpath(TEST_ROOT, file))

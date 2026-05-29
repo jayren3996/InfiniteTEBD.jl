@@ -5,13 +5,13 @@
 From a Julia REPL:
 
 ```julia
-pkg> add https://github.com/jayren3996/iTEBD.jl
+pkg> add InfiniteTEBD
 ```
 
 Then load it with:
 
 ```julia
-using iTEBD
+using InfiniteTEBD
 ```
 
 ## Checking your install
@@ -21,7 +21,7 @@ the Schmidt spectrum on the first bond. If this runs without error and prints
 a normalized vector, the package is working.
 
 ```@example install
-using iTEBD
+using InfiniteTEBD
 
 psi = rand_iMPS(ComplexF64, 2, 2, 4)
 canonical!(psi)
@@ -42,7 +42,7 @@ A random state is the fastest way to get going. The signature
 - `dim`: bond dimension used to sample the initial random tensors.
 
 ```@example first
-using iTEBD
+using InfiniteTEBD
 
 psi = rand_iMPS(ComplexF64, 2, 2, 4)
 ```
@@ -69,7 +69,7 @@ cell, and builds the corresponding bond-dimension-1 product state. All site
 vectors must share the same local dimension; each is normalized internally.
 
 ```@example product
-using iTEBD
+using InfiniteTEBD
 
 z2 = product_iMPS(ComplexF64, [[0, 1], [1, 0], [0, 1], [1, 0]])
 ```
@@ -79,7 +79,7 @@ Bond dimension is `1`, so each `z2.λ[i]` is `[1.0]`.
 
 ## Examples in the repository
 
-The [`examples/`](https://github.com/jayren3996/iTEBD.jl/tree/master/examples)
+The [`examples/`](https://github.com/jayren3996/InfiniteTEBD.jl/tree/master/examples)
 directory contains runnable notebooks for the stable workflows:
 
 - `CanonicalForm.ipynb`

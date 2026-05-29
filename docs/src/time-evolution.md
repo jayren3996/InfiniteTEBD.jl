@@ -82,7 +82,7 @@ produces eleven elementary substeps over two layers. Account for that when
 comparing wall-clock costs.
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 X = [0 1; 1 0]
@@ -178,7 +178,7 @@ To enable adaptive growth, pass `chi_policy=:adaptive` together with the same
 gate list:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 X = sqrt(2) / 2 * [0 1 0; 1 0 1; 0 1 0]
@@ -202,7 +202,7 @@ maximum(length.(psi.λ))
 ## Imaginary-time AKLT example
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 X = sqrt(2) / 2 * [0 1 0; 1 0 1; 0 1 0]

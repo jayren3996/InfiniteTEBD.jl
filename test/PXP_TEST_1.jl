@@ -1,5 +1,5 @@
 using DelimitedFiles
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 using Printf
 using Test
@@ -38,7 +38,7 @@ function _run_series!(psi::iMPS, gate::AbstractMatrix, len::Integer)
             applygate!(psi, gate, 2, 1; maxdim=BOND)
         end
         @printf("Finish: %.2f %%.\n", 100 * (i - 1) / max(len - 1, 1))
-        entropy[i] = iTEBD.ent_S(psi, 1)
+        entropy[i] = InfiniteTEBD.ent_S(psi, 1)
     end
     return entropy
 end

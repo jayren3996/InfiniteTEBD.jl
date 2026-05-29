@@ -1,7 +1,7 @@
 using BenchmarkTools
 using Printf
 using Random
-using iTEBD
+using InfiniteTEBD
 
 const SMOKE_MODE = "--smoke" in ARGS
 const BENCH_SAMPLES = SMOKE_MODE ? 1 : 20
@@ -21,7 +21,7 @@ end
 function main()
     Random.seed!(1234)
     spectrum = collect(range(1.0, 0.001; length=1000))
-    f() = iTEBD._discarded_weight_choice(
+    f() = InfiniteTEBD._discarded_weight_choice(
         spectrum;
         mindim=4,
         maxdim=128,

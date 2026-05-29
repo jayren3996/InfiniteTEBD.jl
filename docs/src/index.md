@@ -1,12 +1,12 @@
 ```@raw html
 <div style="text-align: center; margin-bottom: 1.5rem;">
-  <img src="assets/logo.svg" alt="iTEBD.jl" width="160"/>
+  <img src="assets/logo.svg" alt="InfiniteTEBD.jl" width="160"/>
 </div>
 ```
 
-# iTEBD.jl
+# InfiniteTEBD.jl
 
-`iTEBD.jl` is a Julia package for infinite time-evolving block decimation on
+`InfiniteTEBD.jl` is a Julia package for infinite time-evolving block decimation on
 translationally invariant one-dimensional quantum systems. It targets the
 thermodynamic limit directly: instead of a long finite chain with open or
 periodic boundaries, you specify a periodic unit cell and the package works
@@ -63,7 +63,7 @@ rest of the spectrum is small, which is what `canonical!` exposes by rotating
 the gauge into the Schmidt basis on every bond.
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 
 psi = rand_iMPS(ComplexF64, 2, 2, 4)
 canonical!(psi)
@@ -83,7 +83,7 @@ this representation.
 
 ## Package scope
 
-`iTEBD.jl` is intentionally direct. You specify the unit cell, the local
+`InfiniteTEBD.jl` is intentionally direct. You specify the unit cell, the local
 operators, and the truncation settings (`maxdim`, `cutoff`) explicitly. There
 is no automatic Hamiltonian builder, no DMRG, and no non-Abelian
 quantum-number bookkeeping. Optional Abelian-symmetric tensors (U(1), Z_N,

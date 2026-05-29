@@ -1,5 +1,5 @@
 using Test
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra: I, norm, tr, Diagonal, eigen, Hermitian
 using Random
 
@@ -10,7 +10,7 @@ using TensorKit: U1Irrep, Z2Irrep, ZNIrrep, Vect, dim, block, blocks, space, id,
                  AbstractTensorMap, DiagonalTensorMap, ←, ⊗, @tensor
 
 # Symbol-table reach into the loaded extension for internal helpers.
-const _TKExt = Base.get_extension(iTEBD, :iTEBDTensorKitExt)
+const _TKExt = Base.get_extension(InfiniteTEBD, :InfiniteTEBDTensorKitExt)
 schmidt_values_from_S(S::DiagonalTensorMap) = _TKExt._flatten_diagonal_blocks(S)
 
 @testset "graded_space" begin

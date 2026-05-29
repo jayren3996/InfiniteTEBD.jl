@@ -1,5 +1,5 @@
 using Test
-using iTEBD
+using InfiniteTEBD
 
 @testset "iMPS parametric struct" begin
     @testset "dense alias" begin

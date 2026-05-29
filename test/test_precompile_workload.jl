@@ -1,12 +1,12 @@
 using Test
-using iTEBD
-using iTEBD: product_iMPS, applygate!, evolve!, expect, ent_S, spin_half_ops
+using InfiniteTEBD
+using InfiniteTEBD: product_iMPS, applygate!, evolve!, expect, ent_S, spin_half_ops
 using TensorKit: id, ⊗, codomain
 
 # These two @testsets mirror, line for line, the bodies of the
-# @compile_workload blocks in src/iTEBD.jl and ext/iTEBDTensorKitExt.jl.
+# @compile_workload blocks in src/InfiniteTEBD.jl and ext/InfiniteTEBDTensorKitExt.jl.
 # If the public API drifts, this test fails with a clear error instead of
-# surfacing as an opaque precompilation failure that blocks `using iTEBD`.
+# surfacing as an opaque precompilation failure that blocks `using InfiniteTEBD`.
 
 @testset "precompile workload bodies execute" begin
     @testset "dense core" begin

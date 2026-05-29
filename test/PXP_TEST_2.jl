@@ -2,7 +2,7 @@ using DelimitedFiles
 using LinearAlgebra
 using Printf
 using Test
-using iTEBD
+using InfiniteTEBD
 
 const SMOKE_MODE = "--smoke" in ARGS
 const ERROR_TOL = SMOKE_MODE ? 0.1 : 2.0
@@ -44,7 +44,7 @@ for i in 2:length(reference_entropy)
     for _ in 1:SUB_DIV
         _pxp_step!(z2, gate)
     end
-    entropy[i] = iTEBD.ent_S(z2, 1)
+    entropy[i] = InfiniteTEBD.ent_S(z2, 1)
     @printf("t = %.2f, S = %.5f.\n", t[i], entropy[i])
 end
 

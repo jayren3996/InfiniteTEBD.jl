@@ -1,7 +1,7 @@
 using Test
 using LinearAlgebra
 using Random
-using iTEBD
+using InfiniteTEBD
 
 Random.seed!(20260521)
 
@@ -21,8 +21,8 @@ using .TestUtils: deterministic_tensor
     # Normalize to avoid numerical issues
     K ./= norm(K)
 
-    right = iTEBD.steady_mat(K; dir=:r)
-    left = iTEBD.steady_mat(K; dir=:l)
+    right = InfiniteTEBD.steady_mat(K; dir=:r)
+    left = InfiniteTEBD.steady_mat(K; dir=:l)
 
     @test right isa Hermitian
     @test left isa Hermitian
@@ -32,8 +32,8 @@ using .TestUtils: deterministic_tensor
     # Verify it's actually a fixed point (approximately)
     # For a random tensor, the dominant eigenvalue may not be 1,
     # so we check proportionality rather than equality
-    kraus_r = iTEBD.kraus(K, conj(K), Matrix(right); dir=:r)
-    kraus_l = iTEBD.kraus(K, conj(K), Matrix(left); dir=:l)
+    kraus_r = InfiniteTEBD.kraus(K, conj(K), Matrix(right); dir=:r)
+    kraus_l = InfiniteTEBD.kraus(K, conj(K), Matrix(left); dir=:l)
 
     # Check that applying the transfer operator gives back the same matrix
     # up to a scalar factor (the dominant eigenvalue)
@@ -45,8 +45,8 @@ end
     # For small bond dimensions, dense should still work
     K = ones(ComplexF64, 2, 2, 2) ./ 2
 
-    right = iTEBD.steady_mat(K; dir=:r)
-    left = iTEBD.steady_mat(K; dir=:l)
+    right = InfiniteTEBD.steady_mat(K; dir=:r)
+    left = InfiniteTEBD.steady_mat(K; dir=:l)
 
     @test right isa Hermitian
     @test left isa Hermitian
@@ -59,7 +59,7 @@ end
     K = rand(ComplexF64, 33, 4, 33)
     K ./= norm(K)
 
-    right = iTEBD.steady_mat(K; dir=:r)
+    right = InfiniteTEBD.steady_mat(K; dir=:r)
 
     @test right isa Hermitian
     @test size(right) == (33, 33)
@@ -79,8 +79,8 @@ end
     # Test with small maxdim
     maxdim_val = 5
 
-    U_dense, S_dense, V_dense = iTEBD.svd_trim(A; maxdim=maxdim_val, svd_min=0.0, renormalize=false)
-    U_iter, S_iter, V_iter = iTEBD.svd_trim(A; maxdim=maxdim_val, svd_min=0.0, renormalize=false, use_iterative=true)
+    U_dense, S_dense, V_dense = InfiniteTEBD.svd_trim(A; maxdim=maxdim_val, svd_min=0.0, renormalize=false)
+    U_iter, S_iter, V_iter = InfiniteTEBD.svd_trim(A; maxdim=maxdim_val, svd_min=0.0, renormalize=false, use_iterative=true)
 
     @test length(S_dense) == maxdim_val
     @test length(S_iter) == maxdim_val
@@ -91,14 +91,14 @@ end
 @testset "SVD_TRIM_ITERATIVE_REJECTS_INVALID_MAXDIM" begin
     A = randn(ComplexF64, 10, 10)
 
-    @test_throws ArgumentError iTEBD.svd_trim(A; maxdim=0, use_iterative=true)
+    @test_throws ArgumentError InfiniteTEBD.svd_trim(A; maxdim=0, use_iterative=true)
 end
 
 @testset "SVD_TRIM_ITERATIVE_TRUNCATES_CORRECTLY" begin
     # Diagonal matrix with known spectrum
     D = Diagonal(Float64.(10:-1:1))
 
-    U, S, V = iTEBD.svd_trim(Matrix(D); maxdim=3, svd_min=0.0, renormalize=false, use_iterative=true)
+    U, S, V = InfiniteTEBD.svd_trim(Matrix(D); maxdim=3, svd_min=0.0, renormalize=false, use_iterative=true)
 
     @test length(S) == 3
     # Iterative SVD via Gram matrix has larger numerical error for small singular values.
@@ -114,7 +114,7 @@ end
     A = randn(ComplexF64, n, n)
     A = A + A'
 
-    U, S, V = iTEBD.svd_trim(A; maxdim=5, svd_min=0.0, renormalize=false, use_iterative=nothing)
+    U, S, V = InfiniteTEBD.svd_trim(A; maxdim=5, svd_min=0.0, renormalize=false, use_iterative=nothing)
 
     @test length(S) == 5
     # The singular values should be the 5 largest
@@ -130,7 +130,7 @@ end
     Γ = [rand(Float32, 2, 2, 2), rand(Float32, 2, 2, 2)]
     λ = [Float32[0.5, 0.5], Float32[0.5, 0.5]]
 
-    psi = iTEBD.iMPS(Γ, λ, 2)
+    psi = InfiniteTEBD.iMPS(Γ, λ, 2)
 
     @test eltype(psi) == Float32
     @test psi.λ[1] isa Vector{Float32}
@@ -141,14 +141,14 @@ end
     Γ = [rand(BigFloat, 2, 2, 2)]
     λ = [BigFloat[0.5, 0.5]]
 
-    psi = iTEBD.iMPS(Γ, λ, 1)
+    psi = InfiniteTEBD.iMPS(Γ, λ, 1)
 
     @test eltype(psi) == BigFloat
     @test psi.λ[1] isa Vector{BigFloat}
 end
 
 @testset "RAND_IMPS_PROPAGATES_TYPE_TO_SCHMIDT_VALUES" begin
-    psi = iTEBD.rand_iMPS(Float32, 2, 2, 2)
+    psi = InfiniteTEBD.rand_iMPS(Float32, 2, 2, 2)
 
     @test eltype(psi) == Float32
     # The struct supports Float32 λ; canonicalization may upgrade to Float64
@@ -162,10 +162,10 @@ end
 
 @testset "PRODUCT_IMPS_IS_CANONICALIZED" begin
     # Create a non-normalized product state
-    psi = iTEBD.product_iMPS(ComplexF64, [[2.0, 0.0], [0.0, 3.0]])
+    psi = InfiniteTEBD.product_iMPS(ComplexF64, [[2.0, 0.0], [0.0, 3.0]])
 
     # Should be properly normalized and canonical
-    @test iTEBD.inner_product(psi) ≈ 1.0 atol=1e-10
+    @test InfiniteTEBD.inner_product(psi) ≈ 1.0 atol=1e-10
     
     # Check that Schmidt values are normalized
     for λ in psi.λ
@@ -174,9 +174,9 @@ end
 end
 
 @testset "PRODUCT_IMPS_SINGLE_SITE_NORMALIZED" begin
-    psi = iTEBD.product_iMPS(ComplexF64, [[1.0, 1.0]])
+    psi = InfiniteTEBD.product_iMPS(ComplexF64, [[1.0, 1.0]])
 
-    @test iTEBD.inner_product(psi) ≈ 1.0 atol=1e-10
+    @test InfiniteTEBD.inner_product(psi) ≈ 1.0 atol=1e-10
     @test psi.Γ[1][1, :, 1] ≈ fill(inv(sqrt(2)), 2) atol=1e-10
 end
 
@@ -191,7 +191,7 @@ end
     B[1, 2, 2] = 0.5
     B[2, 1, 1] = 0.3
     B[2, 2, 2] = 0.15
-    psi = iTEBD.iMPS([B], [λ], 1)
+    psi = InfiniteTEBD.iMPS([B], [λ], 1)
 
     Γ, returned_λ = psi[1]
 
@@ -208,7 +208,7 @@ end
     B = zeros(ComplexF64, 2, 2, 2)
     B[1, 1, 1] = 1.0
     B[2, 2, 2] = 0.5
-    psi = iTEBD.iMPS([B], [λ], 1)
+    psi = InfiniteTEBD.iMPS([B], [λ], 1)
 
     Γ, _ = psi[1]
     Γ[1, 1, 1] = 999.0

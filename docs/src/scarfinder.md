@@ -6,7 +6,7 @@ target bond dimension `χ`, it repeatedly evolves, projects back to `χ`, and
 optionally corrects the energy density so the trajectory does not drift toward
 a featureless low-energy state.
 
-`iTEBD.jl` exposes three entry points:
+`InfiniteTEBD.jl` exposes three entry points:
 
 - `scarfinder!(ψ, h, dt, χ, N; ...)` builds `exp(-1im * dt * h)` from the local
   Hamiltonian density `h` and uses it as the real-time gate.
@@ -124,7 +124,7 @@ expected sense: `final_energy` should be close to `target_energy`, and
 small enough to inspect bond-by-bond if you want.
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 P0 = [0 0; 0 1]

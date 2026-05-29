@@ -1,8 +1,8 @@
 using Test
 using LinearAlgebra
 using Random
-using iTEBD
-using iTEBD: product_iMPS, applygate!, evolve!, trotter_gates
+using InfiniteTEBD
+using InfiniteTEBD: product_iMPS, applygate!, evolve!, trotter_gates
 
 Random.seed!(20260526)
 
@@ -73,7 +73,7 @@ end
     @test evolve!(psi_layer, layers, dt, steps; maxdim=4) === psi_layer
     @test psi_layer.λ[1] ≈ psi_manual.λ[1] atol=1e-12
     @test psi_layer.λ[2] ≈ psi_manual.λ[2] atol=1e-12
-    @test iTEBD.inner_product(psi_layer, psi_manual) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(psi_layer, psi_manual) ≈ 1.0 atol=1e-12
 end
 
 @testset "TROTTER_STAGE_SCHEDULES" begin
@@ -86,16 +86,16 @@ end
     b2 = -0.12039526945509727
     b3 = 1 - 2 * (b1 + b2)
 
-    fourth = iTEBD._trotter_stage_schedule(2, :fourth, 1)
+    fourth = InfiniteTEBD._trotter_stage_schedule(2, :fourth, 1)
     @test schedule_layers(fourth) == [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1]
     @test schedule_coeffs(fourth) ≈ [p / 2, p, p, p, (1 - 3p) / 2, q, (1 - 3p) / 2, p, p, p, p / 2] atol=1e-15
 
-    fourth_two = iTEBD._trotter_stage_schedule(2, :fourth, 2)
+    fourth_two = InfiniteTEBD._trotter_stage_schedule(2, :fourth, 2)
     @test length(fourth_two) == 21
     @test schedule_layers(fourth_two)[11] == 1
     @test schedule_coeffs(fourth_two)[11] ≈ p atol=1e-15
 
-    fourth_opt_two = iTEBD._trotter_stage_schedule(2, :fourth_opt, 2)
+    fourth_opt_two = InfiniteTEBD._trotter_stage_schedule(2, :fourth_opt, 2)
     @test schedule_layers(fourth_opt_two) == [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1]
     @test schedule_coeffs(fourth_opt_two) ≈ [
         a1, b1, a2, b2, a3, b3, a3, b2, a2, b1,
@@ -146,8 +146,8 @@ end
     # Multi-step schedule via the internal helper. Stage 1 of step k+1 merges
     # with stage 11 of step k (both layer 1, coeff A1), so the per-step stage
     # count decreases.
-    stages_3 = iTEBD._trotter_stage_schedule(2, :fourth_opt, 3)
-    gates_3 = iTEBD._materialize_trotter_gates(layers, 0.1, stages_3; evolution=:real)
+    stages_3 = InfiniteTEBD._trotter_stage_schedule(2, :fourth_opt, 3)
+    gates_3 = InfiniteTEBD._materialize_trotter_gates(layers, 0.1, stages_3; evolution=:real)
     @test length(gates_3) < 33  # naive count would be 11 * 3 = 33
     # The cache should still produce a small number of unique matrices.
     @test length(unique(objectid(g) for (g, _, _) in gates_3)) <= 8
@@ -172,7 +172,7 @@ end
     end
     @test all(bond_dims[i] >= bond_dims[i-1] for i in 2:length(bond_dims))
     @test all(bond_dims .<= 8)
-    @test isapprox(iTEBD.inner_product(psi), 1.0; atol=1e-8)
+    @test isapprox(InfiniteTEBD.inner_product(psi), 1.0; atol=1e-8)
 end
 
 @testset "EVOLVE_FLOAT32_IMAGINARY_TIME_PRESERVES_ELTYPE" begin
@@ -189,7 +189,7 @@ end
     evolve!(psi, [(G, 1, 2), (G, 2, 1)], 5; maxdim=4, recanonicalize=true)
     @test eltype(psi.Γ[1]) === ComplexF32
     @test eltype(psi.λ[1]) === Float32
-    @test isapprox(iTEBD.inner_product(psi), 1.0; atol=1f-4)
+    @test isapprox(InfiniteTEBD.inner_product(psi), 1.0; atol=1f-4)
 end
 
 @testset "EVOLVE_WRAPAROUND_GATE_UNDER_ADAPTIVE_POLICY" begin
@@ -228,7 +228,7 @@ end
     evolve!(psi, gates, 3; chi_policy=:adaptive, maxdim=8)
 
     @test right_canonical_err(psi) < 1e-8
-    @test isapprox(iTEBD.inner_product(psi), 1.0; atol=1e-8)
+    @test isapprox(InfiniteTEBD.inner_product(psi), 1.0; atol=1e-8)
     # Adaptive ratchet: bond dim never falls below initial.
     @test all(length(psi.λ[i]) >= initial_dims[i] for i in 1:psi.n)
 end
@@ -249,7 +249,7 @@ end
         psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
         evolve!(psi, layers, 0.05, 5; trotter=scheme, evolution=:real, maxdim=8)
         # Norm should hold up under unitary real-time evolution.
-        @test isapprox(iTEBD.inner_product(psi), 1.0; atol=1e-6)
+        @test isapprox(InfiniteTEBD.inner_product(psi), 1.0; atol=1e-6)
         # Bond dim should respect the cap.
         @test maximum(length.(psi.λ)) <= 8
     end
@@ -345,7 +345,7 @@ end
 
 @testset "ONE_SITE_ADAPTIVE_EVOLVE_DOES_NOT_SHRINK_UNRELATED_BONDS" begin
     X = ComplexF64[0 1; 1 0]
-    psi = iTEBD.rand_iMPS(ComplexF64, 3, 2, 3)
+    psi = InfiniteTEBD.rand_iMPS(ComplexF64, 3, 2, 3)
     before_lengths = length.(psi.λ)
 
     evolve!(psi, [(X, 1, 1)], 1; chi_policy=:adaptive, maxdim=1, cutoff=0.0)
@@ -388,7 +388,7 @@ end
     applygate!(psi_manual, inverse_bell_gate, 1, 2; maxdim=1)
     evolve!(psi_evolve, [(bell_gate, 1, 2), (inverse_bell_gate, 1, 2)], 1; maxdim=1)
 
-    @test abs(iTEBD.inner_product(psi_evolve, psi_manual)) ≈ 1.0 atol=1e-12
+    @test abs(InfiniteTEBD.inner_product(psi_evolve, psi_manual)) ≈ 1.0 atol=1e-12
     @test psi_evolve.Γ[1] ≈ psi_manual.Γ[1] atol=1e-12
     @test psi_evolve.Γ[2] ≈ psi_manual.Γ[2] atol=1e-12
 end

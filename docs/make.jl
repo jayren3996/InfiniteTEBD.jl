@@ -1,14 +1,14 @@
 using Documenter
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
-DocMeta.setdocmeta!(iTEBD, :DocTestSetup, :(using iTEBD, LinearAlgebra); recursive=true)
+DocMeta.setdocmeta!(InfiniteTEBD, :DocTestSetup, :(using InfiniteTEBD, LinearAlgebra); recursive=true)
 
 const DOCS_SMOKE = get(ENV, "ITEBD_DOCS_SMOKE", "false") == "true"
 
 makedocs(;
-    sitename="iTEBD.jl",
-    modules=[iTEBD],
+    sitename="InfiniteTEBD.jl",
+    modules=[InfiniteTEBD],
     checkdocs=:exports,
     authors="jayren3996",
     format=Documenter.HTML(prettyurls=get(ENV, "CI", "false") == "true"),
@@ -31,7 +31,7 @@ makedocs(;
 
 if !DOCS_SMOKE
     deploydocs(
-        repo="github.com/jayren3996/iTEBD.jl.git",
+        repo="github.com/jayren3996/InfiniteTEBD.jl.git",
         devbranch="master",
     )
 end

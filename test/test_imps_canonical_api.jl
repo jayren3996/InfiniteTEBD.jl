@@ -1,8 +1,8 @@
 using Test
 using LinearAlgebra
 using Random
-using iTEBD
-using iTEBD: rand_iMPS, product_iMPS, canonical!, iMPS
+using InfiniteTEBD
+using InfiniteTEBD: rand_iMPS, product_iMPS, canonical!, iMPS
 
 Random.seed!(20260522)
 
@@ -33,7 +33,7 @@ end
     assert_normalized_schmidt_spectra(psi; atol=1e-10)
     assert_stored_tensor_convention(psi; atol=1e-12)
     @test right_canonical_error(psi) <= 1e-10
-    @test iTEBD.inner_product(psi) ≈ 1.0 atol=1e-10
+    @test InfiniteTEBD.inner_product(psi) ≈ 1.0 atol=1e-10
 end
 
 @testset "PRODUCT_IMPS_CANONICAL_ON_CONSTRUCTION" begin
@@ -42,7 +42,7 @@ end
     assert_normalized_schmidt_spectra(psi; atol=1e-12)
     assert_stored_tensor_convention(psi; atol=1e-12)
     @test right_canonical_error(psi) <= 1e-12
-    @test iTEBD.inner_product(psi) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(psi) ≈ 1.0 atol=1e-12
 
     psi_untyped = product_iMPS([[1, 1]])
     @test eltype(psi_untyped) == Float64
@@ -90,11 +90,11 @@ end
     # large-enough cell that the Krylov path actually runs (a > 8).
     psi = rand_iMPS(ComplexF64, 1, 2, 16)
     canonical!(psi; tol=1e-14)
-    @test isapprox(iTEBD.inner_product(psi), 1.0; atol=1e-10)
+    @test isapprox(InfiniteTEBD.inner_product(psi), 1.0; atol=1e-10)
 
     psi2 = rand_iMPS(ComplexF64, 1, 2, 16)
     canonical!(psi2; tol=1e-8, maxiter=200)
-    @test isapprox(iTEBD.inner_product(psi2), 1.0; atol=1e-6)
+    @test isapprox(InfiniteTEBD.inner_product(psi2), 1.0; atol=1e-6)
 end
 
 @testset "CANONICAL_ARGUMENT_VALIDATION" begin
@@ -181,7 +181,7 @@ end
 end
 
 @testset "NO_BLOCK_CANONICAL_EXPORT" begin
-    @test !isdefined(iTEBD, :block_canonical)
+    @test !isdefined(InfiniteTEBD, :block_canonical)
 end
 
 @testset "CONJ_IMPS_INDEPENDENT_SCHMIDT" begin
@@ -201,7 +201,7 @@ end
 
 @testset "MPS_PROMOTE_TYPE_CONVERTS_AND_COPIES" begin
     psi = rand_iMPS(ComplexF64, 2, 2, 4)
-    psi32 = iTEBD.mps_promote_type(ComplexF32, psi)
+    psi32 = InfiniteTEBD.mps_promote_type(ComplexF32, psi)
     @test all(eltype(Γ) == ComplexF32 for Γ in psi32.Γ)
     @test psi32.n == psi.n
     # λ must be deep-copied so the promoted state has independent storage.
@@ -230,7 +230,7 @@ end
         @test maximum(length, psi.λ) <= 2
         @test right_canonical_error(psi) <= 1e-10
         assert_normalized_schmidt_spectra(psi; atol=1e-10)
-        @test iTEBD.inner_product(psi) ≈ 1.0 atol=1e-9
+        @test InfiniteTEBD.inner_product(psi) ≈ 1.0 atol=1e-9
     end
 end
 
@@ -243,8 +243,8 @@ end
     for n in (1, 2, 3)
         psi = rand_iMPS(ComplexF64, n, 2, 4)
         canonical!(psi)
-        Γ = iTEBD.tensor_group(psi.Γ)
-        L = Matrix(iTEBD.steady_mat(Γ; dir=:l))
+        Γ = InfiniteTEBD.tensor_group(psi.Γ)
+        L = Matrix(InfiniteTEBD.steady_mat(Γ; dir=:l))
         L_norm = L / tr(L)
         # off-diagonal must be small (state is already in the basis where λ²
         # is diagonal)
@@ -261,8 +261,8 @@ end
     for n in (1, 2, 3)
         psi = rand_iMPS(ComplexF64, n, 2, 4)
         canonical!(psi)
-        Γ = iTEBD.tensor_group(psi.Γ)
-        T = iTEBD.kraus_mat(Γ, conj(Γ); dir=:r)
+        Γ = InfiniteTEBD.tensor_group(psi.Γ)
+        T = InfiniteTEBD.kraus_mat(Γ, conj(Γ); dir=:r)
         λ_max = maximum(abs, eigvals(T))
         @test λ_max ≈ 1.0 atol=1e-9
     end

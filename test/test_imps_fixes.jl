@@ -6,9 +6,9 @@ using ITensorMPS
 
 Random.seed!(20260525)
 
-@isdefined(iTEBD) || include("../src/iTEBD.jl")
-using .iTEBD: iTEBD, iMPS, rand_iMPS, product_iMPS, canonical!, expect, getindex
-using .iTEBD: MAXDIM, SVDTOL, SORTTOL, ZEROTOL
+@isdefined(InfiniteTEBD) || include("../src/InfiniteTEBD.jl")
+using .InfiniteTEBD: InfiniteTEBD, iMPS, rand_iMPS, product_iMPS, canonical!, expect, getindex
+using .InfiniteTEBD: MAXDIM, SVDTOL, SORTTOL, ZEROTOL
 
 #-----------------------------------------------------------------------
 # Issue 1: imps2mps converts product iMPS to finite MPS
@@ -16,7 +16,7 @@ using .iTEBD: MAXDIM, SVDTOL, SORTTOL, ZEROTOL
 @testset "IMPS2MPS_PRODUCT_STATE" begin
     ψ = product_iMPS(ComplexF64, [[1, 0]])
     sites = [Index(2, "site=$i") for i in 1:4]
-    mps = iTEBD.imps2mps(ψ, sites)
+    mps = InfiniteTEBD.imps2mps(ψ, sites)
 
     @test mps isa ITensorMPS.AbstractMPS
     @test length(mps) == length(sites)
@@ -25,7 +25,7 @@ end
 @testset "IMPS2MPS_REPEATS_UNIT_CELL_TO_REQUESTED_LENGTH" begin
     ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
     sites = [Index(2, "site=$i") for i in 1:5]
-    mps = iTEBD.imps2mps(ψ, sites; L=length(sites))
+    mps = InfiniteTEBD.imps2mps(ψ, sites; L=length(sites))
 
     @test mps isa ITensorMPS.AbstractMPS
     @test length(mps) == length(sites)
@@ -38,7 +38,7 @@ end
     # legs.
     ψ = product_iMPS(ComplexF64, [[1, 0]])
     sites = [Index(2, "site=1")]
-    mps = iTEBD.imps2mps(ψ, sites; L=1)
+    mps = InfiniteTEBD.imps2mps(ψ, sites; L=1)
 
     @test mps isa ITensorMPS.AbstractMPS
     @test length(mps) == 1

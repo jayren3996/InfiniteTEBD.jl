@@ -1,6 +1,6 @@
 using Test
 using LinearAlgebra
-using iTEBD
+using InfiniteTEBD
 
 if !isdefined(Main, :TestUtils)
     include(joinpath(@__DIR__, "test_utils.jl"))
@@ -13,27 +13,27 @@ using .TestUtils: deterministic_tensor, pauli_matrices
     ψ00 = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
     ψ01 = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 
-    @test iTEBD.expect(ψ00, P.Z, 1, 1) ≈ 1.0 atol=1e-12
-    @test iTEBD.expect(ψ01, P.Z, 2, 2) ≈ -1.0 atol=1e-12
-    @test iTEBD.expect(ψ01, kron(P.Z, P.Z), 1, 2) ≈ -1.0 atol=1e-12
-    @test iTEBD.expect(ψ01, kron(P.Z, P.Z), 2, 1) ≈ -1.0 atol=1e-12
-    @test iTEBD.expect(ψ00, P.X, 1, 1) ≈ 0.0 atol=1e-12
-    @test iTEBD.expect(ψ00, P.I, 1, 1) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ00, P.Z, 1, 1) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ01, P.Z, 2, 2) ≈ -1.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ01, kron(P.Z, P.Z), 1, 2) ≈ -1.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ01, kron(P.Z, P.Z), 2, 1) ≈ -1.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ00, P.X, 1, 1) ≈ 0.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ00, P.I, 1, 1) ≈ 1.0 atol=1e-12
 end
 
 @testset "INNER_PRODUCT_PRODUCT_STATES" begin
     ψ00 = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
     ψ01 = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 
-    @test iTEBD.inner_product(ψ00) ≈ 1.0 atol=1e-12
-    @test iTEBD.inner_product(ψ00, ψ00) ≈ 1.0 atol=1e-12
-    @test iTEBD.inner_product(ψ00, ψ01) ≈ 0.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ00) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ00, ψ00) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ00, ψ01) ≈ 0.0 atol=1e-12
 end
 
 @testset "INNER_PRODUCT_ACCEPTS_TENSOR_VECTOR_SELF_OVERLAP" begin
     ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 
-    @test iTEBD.inner_product(ψ.Γ) ≈ iTEBD.inner_product(ψ.Γ, ψ.Γ) atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ.Γ) ≈ InfiniteTEBD.inner_product(ψ.Γ, ψ.Γ) atol=1e-12
 end
 
 @testset "INNER_PRODUCT_MATRIX_FREE_MATCHES_DENSE_PATH" begin
@@ -48,8 +48,8 @@ end
             Q, _ = qr(transpose(reshape(G, χ, d * χ)))
             push!(T, reshape(transpose(Matrix(Q)[:, 1:χ]), χ, d, χ))
         end
-        matfree = iTEBD.inner_product(T)
-        dense = iTEBD._dominant_eigenvalue_dense(iTEBD.gtrm(T, T))
+        matfree = InfiniteTEBD.inner_product(T)
+        dense = InfiniteTEBD._dominant_eigenvalue_dense(InfiniteTEBD.gtrm(T, T))
         @test matfree ≈ dense rtol=1e-8
     end
 end
@@ -67,8 +67,8 @@ end
             Q, _ = qr(transpose(reshape(G, χ, d * χ)))
             push!(T, reshape(transpose(Matrix(Q)[:, 1:χ]), χ, d, χ))
         end
-        matfree = iTEBD.inner_product(T)
-        dense = iTEBD._dominant_eigenvalue_dense(iTEBD.gtrm(T, T))
+        matfree = InfiniteTEBD.inner_product(T)
+        dense = InfiniteTEBD._dominant_eigenvalue_dense(InfiniteTEBD.gtrm(T, T))
         @test matfree ≈ dense rtol=1e-8
     end
 end
@@ -87,7 +87,7 @@ end
             Q, _ = qr(transpose(reshape(G, χ, 2χ)))
             push!(T, reshape(transpose(Matrix(Q)[:, 1:χ]), χ, 2, χ))
         end
-        @test iTEBD.inner_product(T) ≈ 1.0 atol=1e-8
+        @test InfiniteTEBD.inner_product(T) ≈ 1.0 atol=1e-8
     end
 end
 
@@ -105,14 +105,14 @@ end
         # pair (χR_T2_n, χR_T1_n) = (χs[n], χs[n]).
         ρ = randn(ComplexF64, χs[n], χs[n])
 
-        ref = iTEBD.apply_chain_transfer(T1s, T2s, ρ; dir=:r)
-        ws = iTEBD.ChainTransferWorkspace(ComplexF64, T1s, T2s)
-        new = iTEBD.apply_chain_transfer!(ws, T1s, T2s, ρ; dir=:r)
+        ref = InfiniteTEBD.apply_chain_transfer(T1s, T2s, ρ; dir=:r)
+        ws = InfiniteTEBD.ChainTransferWorkspace(ComplexF64, T1s, T2s)
+        new = InfiniteTEBD.apply_chain_transfer!(ws, T1s, T2s, ρ; dir=:r)
         @test new ≈ ref rtol=1e-10
 
         # Workspace must produce identical results on repeated calls (catches
         # ping-pong index bugs where the wrong buffer is returned).
-        new2 = iTEBD.apply_chain_transfer!(ws, T1s, T2s, ρ; dir=:r)
+        new2 = InfiniteTEBD.apply_chain_transfer!(ws, T1s, T2s, ρ; dir=:r)
         @test new2 ≈ ref rtol=1e-10
     end
 end
@@ -126,12 +126,12 @@ end
     λl = collect(range(0.5, 1.5; length=16))
 
     function materialized_contract()
-        Γ = iTEBD.tensor_group(Ts)
-        iTEBD.tensor_lmul!(λl, Γ)
-        return dot(Γ, iTEBD.tensor_umul(O, Γ))
+        Γ = InfiniteTEBD.tensor_group(Ts)
+        InfiniteTEBD.tensor_lmul!(λl, Γ)
+        return dot(Γ, InfiniteTEBD.tensor_umul(O, Γ))
     end
 
-    f() = iTEBD.ocontract(Ts, O, λl)
+    f() = InfiniteTEBD.ocontract(Ts, O, λl)
 
     @test f() ≈ materialized_contract()
     f()
@@ -155,20 +155,20 @@ end
 
     psi = rand_iMPS(ComplexF64, 2, 2, 4)
     canonical!(psi)
-    default = iTEBD.inner_product(psi)
-    tight   = iTEBD.inner_product(psi; tol=1e-14)
-    loose   = iTEBD.inner_product(psi; tol=1e-6, maxiter=20)
+    default = InfiniteTEBD.inner_product(psi)
+    tight   = InfiniteTEBD.inner_product(psi; tol=1e-14)
+    loose   = InfiniteTEBD.inner_product(psi; tol=1e-6, maxiter=20)
 
     @test default ≈ 1.0 atol=1e-10
     @test tight   ≈ 1.0 atol=1e-10
     @test loose   ≈ 1.0 atol=1e-4
 
     # Two-arg form on tensor vectors.
-    @test iTEBD.inner_product(psi.Γ, psi.Γ; tol=1e-12, maxiter=50) ≈ 1.0 atol=1e-10
+    @test InfiniteTEBD.inner_product(psi.Γ, psi.Γ; tol=1e-12, maxiter=50) ≈ 1.0 atol=1e-10
 
     # Single-tensor form.
     T = first(psi.Γ)
-    @test iTEBD.inner_product(T; tol=1e-12) ≈ iTEBD.inner_product(T) atol=1e-10
+    @test InfiniteTEBD.inner_product(T; tol=1e-12) ≈ InfiniteTEBD.inner_product(T) atol=1e-10
 end
 
 @testset "ENT_S_PRODUCT_STATE_IS_ZERO" begin
@@ -212,9 +212,9 @@ end
     ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])  # d=2, 2-site cell
     Z = ComplexF64[1 0; 0 -1]
     bad_3site = ComplexF64.(Matrix{Float64}(I, 8, 8))   # 2^3 = 8 but block is 2 sites
-    @test_throws Exception iTEBD.expect(ψ, bad_3site, 1, 2)
+    @test_throws Exception InfiniteTEBD.expect(ψ, bad_3site, 1, 2)
     # A 1-site operator on a 2-site block also wrong-sized.
-    @test_throws Exception iTEBD.expect(ψ, Z, 1, 2)
+    @test_throws Exception InfiniteTEBD.expect(ψ, Z, 1, 2)
 end
 
 @testset "INNER_PRODUCT_ORTHOGONAL_PRODUCT_STATES" begin
@@ -225,8 +225,8 @@ end
     down = ComplexF64[0, 1]
     ψ_up   = product_iMPS(ComplexF64, [up, up])
     ψ_down = product_iMPS(ComplexF64, [down, down])
-    @test isapprox(iTEBD.inner_product(ψ_up, ψ_down), 0.0; atol=1e-12)
-    @test isapprox(iTEBD.inner_product(ψ_up,   ψ_up),   1.0; atol=1e-12)
+    @test isapprox(InfiniteTEBD.inner_product(ψ_up, ψ_down), 0.0; atol=1e-12)
+    @test isapprox(InfiniteTEBD.inner_product(ψ_up,   ψ_up),   1.0; atol=1e-12)
 end
 
 @testset "ENERGY_SPAN_BRACKETS_HEISENBERG" begin

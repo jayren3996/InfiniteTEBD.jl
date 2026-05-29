@@ -1,7 +1,7 @@
 using LinearAlgebra
 using Test
-using iTEBD
-using iTEBD: product_iMPS, scarfinder_step!
+using InfiniteTEBD
+using InfiniteTEBD: product_iMPS, scarfinder_step!
 
 @testset "SCARFINDER_NSTEP" begin
     psi_h = product_iMPS(ComplexF64, [[1, 0], [1, 0]])

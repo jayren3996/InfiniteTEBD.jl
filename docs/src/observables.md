@@ -55,7 +55,7 @@ than for the whole chain. Two states that agree up to a global phase therefore
 report `1`, and orthogonal states report `0`.
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 
 psi1 = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 psi2 = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
@@ -66,7 +66,7 @@ For a single argument, `inner_product(ψ)` reduces to the norm per unit cell of
 `ψ`:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 
 psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 inner_product(psi)
@@ -82,7 +82,7 @@ must equal `d^(j - i + 1)` where `d` is the local Hilbert-space dimension.
 Single-site Pauli measurement on a two-site cell:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 
 psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 Z = [1 0; 0 -1]
@@ -93,7 +93,7 @@ The site index addresses the second basis state on site 2, so the same operator
 gives the opposite sign there:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 
 psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 Z = [1 0; 0 -1]
@@ -104,7 +104,7 @@ Multi-site operators use `kron` (with the leftmost site as the leftmost factor)
 and span the contiguous interval `i:j`:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
@@ -121,7 +121,7 @@ canonicalized before measurement, otherwise `ψ.λ[i]` is not the Schmidt
 spectrum of a cut.
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 
 psi = rand_iMPS(ComplexF64, 2, 2, 4)
 canonical!(psi)
@@ -131,7 +131,7 @@ ent_S(psi, 1)
 For a product state the entropy is zero across every bond:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 
 psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 ent_S(psi, 1)
@@ -155,7 +155,7 @@ for some integer `span`.
 A two-site Heisenberg-like density on a two-site unit cell:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 Sx = [0 1; 1 0] / 2
@@ -170,7 +170,7 @@ energy_density(psi, h)            # span inferred as 2 from size(h) = (4, 4)
 The same call with an explicit `span` argument:
 
 ```@example
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 Sx = [0 1; 1 0] / 2
@@ -200,7 +200,7 @@ bracket is a heuristic estimate of the range reachable by iTEBD at the chosen
 `maxdim`, not a rigorous variational bound.
 
 ```julia
-using iTEBD
+using InfiniteTEBD
 using LinearAlgebra
 
 Sx = [0 1; 1 0] / 2

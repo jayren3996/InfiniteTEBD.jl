@@ -1,7 +1,7 @@
 using Test
 using LinearAlgebra
 using Random
-using iTEBD
+using InfiniteTEBD
 
 Random.seed!(20260523)
 
@@ -12,20 +12,20 @@ using .TestUtils: bell_gate, pauli_matrices, right_canonical_error
 
 @testset "GATE_INDICES_NON_WRAPPING" begin
     psi = product_iMPS(ComplexF64, [[1,0], [0,1], [1,0]])
-    inds = iTEBD._gate_indices(psi, 1, 2)
+    inds = InfiniteTEBD._gate_indices(psi, 1, 2)
     @test inds == 1:2
     @test inds isa UnitRange
 end
 
 @testset "GATE_INDICES_WRAPPING" begin
     psi = product_iMPS(ComplexF64, [[1,0], [0,1], [1,0]])
-    inds = iTEBD._gate_indices(psi, 2, 1)
+    inds = InfiniteTEBD._gate_indices(psi, 2, 1)
     @test collect(inds) == [2, 3, 1]
 end
 
 @testset "GATE_INDICES_SINGLE_SITE" begin
     psi = product_iMPS(ComplexF64, [[1,0], [0,1]])
-    inds = iTEBD._gate_indices(psi, 1, 1)
+    inds = InfiniteTEBD._gate_indices(psi, 1, 1)
     @test collect(inds) == [1]
 end
 
@@ -41,10 +41,10 @@ end
     G = ComplexF64[0 1; 1 0]
     Γ = rand(ComplexF64, 3, 2, 3)
     Γ_orig = copy(Γ)
-    Γ_new = iTEBD.tensor_umul(G, Γ)
-    iTEBD.tensor_umul!(G, Γ)
+    Γ_new = InfiniteTEBD.tensor_umul(G, Γ)
+    InfiniteTEBD.tensor_umul!(G, Γ)
     @test Γ ≈ Γ_new atol=1e-12
-    @test Γ ≈ iTEBD.tensor_umul(G, Γ_orig) atol=1e-12
+    @test Γ ≈ InfiniteTEBD.tensor_umul(G, Γ_orig) atol=1e-12
 end
 
 @testset "APPLYGATE_ONE_SITE_PATH_RETURNS_EMPTY_STATS" begin
@@ -54,7 +54,7 @@ end
     ψ_after, stats = applygate!(ψ, P.X, 1, 1; return_stats=true)
 
     @test ψ_after === ψ
-    @test iTEBD.expect(ψ, P.Z, 1, 1) ≈ -1.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ, P.Z, 1, 1) ≈ -1.0 atol=1e-12
     @test stats.support == (1, 1)
     @test isempty(stats.bond_stats)
     @test stats.max_discarded_weight == 0.0
@@ -80,7 +80,7 @@ end
     @test stats.num_saturated >= 0
     @test !isempty(stats.gate_updates)
     # Per-gate stats should be the typed BondStat objects, not Any.
-    @test eltype(first(stats.gate_updates).bond_stats) === iTEBD.BondStat
+    @test eltype(first(stats.gate_updates).bond_stats) === InfiniteTEBD.BondStat
 end
 
 @testset "APPLYGATE_NORMALIZES_PERIODIC_SITE_INDICES" begin
@@ -91,7 +91,7 @@ end
     ψ_after, stats = applygate!(ψ, P.X, n + 1, n + 1; return_stats=true)
 
     @test ψ_after === ψ
-    @test iTEBD.expect(ψ, P.Z, 1, 1) ≈ -1.0 atol=1e-12
+    @test InfiniteTEBD.expect(ψ, P.Z, 1, 1) ≈ -1.0 atol=1e-12
     @test stats.support == (1, 1)
     @test isempty(stats.bond_stats)
 end
@@ -102,7 +102,7 @@ end
 
     applygate!(ψ, Matrix{ComplexF64}(I, 4, 4), 1, 2; maxdim=4)
 
-    @test iTEBD.inner_product(ψ, ψ0) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ, ψ0) ≈ 1.0 atol=1e-12
     @test maximum(length.(ψ.λ)) == 1
 end
 
@@ -114,7 +114,7 @@ end
     applygate!(ψ, G, 2, 1; maxdim=4)
     applygate!(ψ, adjoint(G), 2, 1; maxdim=4)
 
-    @test iTEBD.inner_product(ψ, ψ0) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ, ψ0) ≈ 1.0 atol=1e-12
     @test maximum(length.(ψ.λ)) == 1
 end
 
@@ -129,7 +129,7 @@ end
 
     @test stats.support == (3, 1)
     @test length.(ψ_wrapped.λ) == length.(ψ_direct.λ)
-    @test iTEBD.inner_product(ψ_wrapped, ψ_direct) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ_wrapped, ψ_direct) ≈ 1.0 atol=1e-12
 end
 
 @testset "APPLYGATE_WRAPAROUND_RESTORES_CANONICAL_FORM" begin
@@ -148,7 +148,7 @@ end
     applygate!(ψ, G, 4, 1)  # j < i → wraparound
 
     @test right_canonical_error(ψ) < 1e-10
-    @test iTEBD.inner_product(ψ) ≈ 1.0 atol=1e-10
+    @test InfiniteTEBD.inner_product(ψ) ≈ 1.0 atol=1e-10
 end
 
 @testset "APPLYGATE_SINGLE_SITE_RENORMALIZES_NON_UNITARY_GATE" begin
@@ -159,13 +159,13 @@ end
     ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])  # site 2 is |↓⟩
     G = exp(-0.5 * P.Z)  # |↓⟩ has Z=-1, so G|↓⟩ = exp(0.5)|↓⟩
     applygate!(ψ, G, 2, 2; renormalize=true)
-    @test iTEBD.inner_product(ψ) ≈ 1.0 atol=1e-12
+    @test InfiniteTEBD.inner_product(ψ) ≈ 1.0 atol=1e-12
 
     # renormalize=false preserves the un-normalized magnitude so the caller
     # can rescale themselves; verify the documented opt-out works.
     ψ2 = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
     applygate!(ψ2, G, 2, 2; renormalize=false)
-    @test iTEBD.inner_product(ψ2) ≈ exp(1) atol=1e-12  # |exp(0.5)|² = e
+    @test InfiniteTEBD.inner_product(ψ2) ≈ exp(1) atol=1e-12  # |exp(0.5)|² = e
 end
 
 @testset "LEGACY_CUTOFF_KEYWORD_IS_ACCEPTED" begin
@@ -173,18 +173,18 @@ end
     ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
 
     # Default behaviour: both nothing -> SVDTOL.
-    @test iTEBD._resolve_svd_min(nothing, nothing) == iTEBD.SVDTOL
+    @test InfiniteTEBD._resolve_svd_min(nothing, nothing) == InfiniteTEBD.SVDTOL
     # Explicit svd_min, no cutoff.
-    @test iTEBD._resolve_svd_min(iTEBD.SVDTOL, nothing) == iTEBD.SVDTOL
-    @test iTEBD._resolve_svd_min(1.5e-10, nothing) == 1.5e-10
+    @test InfiniteTEBD._resolve_svd_min(InfiniteTEBD.SVDTOL, nothing) == InfiniteTEBD.SVDTOL
+    @test InfiniteTEBD._resolve_svd_min(1.5e-10, nothing) == 1.5e-10
     # Cutoff alone resolves to the cutoff value.
-    @test iTEBD._resolve_svd_min(nothing, 0.0) == 0.0
-    @test iTEBD._resolve_svd_min(nothing, 1.5e-10) == 1.5e-10
+    @test InfiniteTEBD._resolve_svd_min(nothing, 0.0) == 0.0
+    @test InfiniteTEBD._resolve_svd_min(nothing, 1.5e-10) == 1.5e-10
     # Passing both is always an error, even if svd_min equals the historical
     # default — the previous behaviour silently dropped svd_min, which made
     # it impossible to tell whether the caller intended SVDTOL or had a typo.
-    @test_throws ArgumentError iTEBD._resolve_svd_min(iTEBD.SVDTOL, 0.0)
-    @test_throws ArgumentError iTEBD._resolve_svd_min(1.5e-10, 2e-12)
+    @test_throws ArgumentError InfiniteTEBD._resolve_svd_min(InfiniteTEBD.SVDTOL, 0.0)
+    @test_throws ArgumentError InfiniteTEBD._resolve_svd_min(1.5e-10, 2e-12)
     @test applygate!(ψ, G, 1, 2; maxdim=4, cutoff=0.0) === ψ
     @test maximum(length.(ψ.λ)) == 2
     @test_throws ArgumentError applygate!(ψ, G, 1, 2; cutoff=1e-12, svd_min=2e-12)
@@ -254,9 +254,9 @@ end
 @testset "CONVERT_OPERATOR_ORDERING" begin
     M = reshape(collect(1.0:16.0), 4, 4)
     I4 = Matrix{Float64}(I, 4, 4)
-    C = iTEBD.convert_operator(M, 2, 2)
+    C = InfiniteTEBD.convert_operator(M, 2, 2)
 
     @test size(C) == (4, 4)
-    @test iTEBD.convert_operator(C, 2, 2) == M
-    @test iTEBD.convert_operator([1.0 2.0; 3.0 4.0], 2, 1) == [1.0 2.0; 3.0 4.0]
+    @test InfiniteTEBD.convert_operator(C, 2, 2) == M
+    @test InfiniteTEBD.convert_operator([1.0 2.0; 3.0 4.0], 2, 1) == [1.0 2.0; 3.0 4.0]
 end

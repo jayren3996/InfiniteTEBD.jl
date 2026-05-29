@@ -1,6 +1,6 @@
 using Test
 using LinearAlgebra
-using iTEBD
+using InfiniteTEBD
 
 if !isdefined(Main, :TestUtils)
     include(joinpath(@__DIR__, "test_utils.jl"))
@@ -32,23 +32,23 @@ end
 end
 
 @testset "SCARFINDER_NSTEP_VALIDATION" begin
-    @test_throws ArgumentError iTEBD._warn_scarfinder_nstep(0, :gate)
-    @test iTEBD._warn_scarfinder_nstep(2, :gate) === nothing
+    @test_throws ArgumentError InfiniteTEBD._warn_scarfinder_nstep(0, :gate)
+    @test InfiniteTEBD._warn_scarfinder_nstep(2, :gate) === nothing
 end
 
 @testset "SCARFINDER_UNIFORM_EVOLVE_VALIDATION" begin
     ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
     G = Matrix{ComplexF64}(I, 2, 2)
 
-    @test_throws ArgumentError iTEBD._evolve_uniform!(ψ, G; span=0)
-    @test_throws ArgumentError iTEBD._evolve_uniform!(ψ, Matrix{ComplexF64}(I, 8, 8); span=3)
-    @test iTEBD._evolve_uniform!(ψ, G; span=1, maxdim=1) === ψ
+    @test_throws ArgumentError InfiniteTEBD._evolve_uniform!(ψ, G; span=0)
+    @test_throws ArgumentError InfiniteTEBD._evolve_uniform!(ψ, Matrix{ComplexF64}(I, 8, 8); span=3)
+    @test InfiniteTEBD._evolve_uniform!(ψ, G; span=1, maxdim=1) === ψ
 end
 
 @testset "SCARFINDER_TRUNCATE_ONE_SITE_UNITCELL" begin
     ψ = product_iMPS(ComplexF64, [[1, 0]])
 
-    @test iTEBD._truncate_unitcell!(ψ, 1) === ψ
+    @test InfiniteTEBD._truncate_unitcell!(ψ, 1) === ψ
     @test ψ.n == 1
     @test length(ψ.λ[1]) == 1
 end
@@ -60,7 +60,7 @@ end
     ψ_uniform = deepcopy(ψ)
     ψ_explicit = deepcopy(ψ)
 
-    iTEBD._evolve_uniform!(ψ_uniform, G; span=2, maxdim=4)
+    InfiniteTEBD._evolve_uniform!(ψ_uniform, G; span=2, maxdim=4)
     applygate!(ψ_explicit, G, 1, 2; maxdim=4)
     applygate!(ψ_explicit, G, 2, 1; maxdim=4)
 
@@ -69,7 +69,7 @@ end
     @test ψ_uniform.λ[1] ≈ ψ_explicit.λ[1] atol=1e-12
     @test ψ_uniform.λ[2] ≈ ψ_explicit.λ[2] atol=1e-12
     if size.(ψ_uniform.Γ) == size.(ψ_explicit.Γ)
-        @test iTEBD.inner_product(ψ_uniform, ψ_explicit) ≈ 1.0 atol=1e-12
+        @test InfiniteTEBD.inner_product(ψ_uniform, ψ_explicit) ≈ 1.0 atol=1e-12
     end
 end
 
@@ -89,7 +89,7 @@ end
         x.λ[1][1] = (idx == 3 ? 2.0 : idx == 2 ? 1.0 : idx == 4 ? 1.0 : 0.0)
         return x
     end
-    iTEBD._minimize_on_trajectory!(f, step!, ψ, 4)
+    InfiniteTEBD._minimize_on_trajectory!(f, step!, ψ, 4)
     @test f(ψ) == -2.0
     @test ψ.λ[1][1] == 2.0
 end

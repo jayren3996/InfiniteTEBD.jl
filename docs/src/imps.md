@@ -83,7 +83,7 @@ Both constructors interpret `Γs` as raw local tensors (any shape, any normaliza
 ## Example: random state, both views of site 1
 
 ```@example states
-using iTEBD
+using InfiniteTEBD
 
 psi = rand_iMPS(ComplexF64, 1, 2, 4)
 canonical!(psi; maxdim=4, cutoff=1e-12, renormalize=true)
@@ -108,7 +108,7 @@ Gamma1, lambda1 = psi[1]
 A Néel-like `Z_2` product state on a two-site unit cell has a single non-zero Schmidt value on every bond:
 
 ```@example states
-using iTEBD
+using InfiniteTEBD
 
 up   = ComplexF64[1, 0]
 down = ComplexF64[0, 1]

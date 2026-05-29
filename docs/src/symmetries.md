@@ -1,6 +1,6 @@
 # Symmetric infinite MPS
 
-`iTEBD.jl` ships with an optional symmetric backend that lets you exploit
+`InfiniteTEBD.jl` ships with an optional symmetric backend that lets you exploit
 Abelian conservation laws — total `Sz`, particle number `N`, parity, or any
 combination of these — without ever leaving the `iMPS` API you already know.
 
@@ -11,7 +11,7 @@ TensorKit.**
 
 ## What you gain
 
-For the spin-1/2 XXZ chain, total `Sz` is conserved. If you tell `iTEBD.jl`
+For the spin-1/2 XXZ chain, total `Sz` is conserved. If you tell `InfiniteTEBD.jl`
 this, every internal tensor splits into independent blocks labelled by `Sz`,
 so at a fixed bond dimension `χ` only about `1/√χ` of the dense data still
 needs to be stored — a memory saving that grows like `√χ`. The numerical
@@ -26,10 +26,10 @@ throughout, so the charges are `+1` and `-1`.
 
 A *graded vector space* is a regular vector space whose basis vectors each
 carry a charge. The spin-1/2 physical leg is the graded vector space
-`P = (Sz=+1) ⊕ (Sz=-1)`. In `iTEBD.jl` you build it with:
+`P = (Sz=+1) ⊕ (Sz=-1)`. In `InfiniteTEBD.jl` you build it with:
 
 ```julia
-using iTEBD
+using InfiniteTEBD
 using TensorKit                # loads the symmetric extension
 P = graded_space(:U1, 1=>1, -1=>1)
 ```
@@ -67,10 +67,10 @@ Worked example. With `Sz, SzSz, SpSm, SmSp = spin_half_ops(:U1)`:
 | `SpSm`     | 0  | composite: `+2` on site 1 cancels `-2` on site 2 |
 | `SmSp`     | 0  | symmetric to above |
 
-**Practical consequence for `iTEBD.jl`:** the two-site Hamiltonian density
+**Practical consequence for `InfiniteTEBD.jl`:** the two-site Hamiltonian density
 `h = Sz⊗Sz + (1/2)(S+⊗S- + S-⊗S+)` is meaningful because every term has
 total flux 0: `Sz⊗Sz` is two flux-0 operators on adjacent sites; `S+⊗S-`
-pairs a +2 with a −2, summing to 0; same for `S-⊗S+`. `iTEBD.jl`'s
+pairs a +2 with a −2, summing to 0; same for `S-⊗S+`. `InfiniteTEBD.jl`'s
 `spin_half_ops(:U1)` returns these pre-assembled two-site terms
 (`SzSz`, `SpSm`, `SmSp`) so you can add them and `exp` them freely. The
 individual single-site `S+` and `S-` are not returned because composing
@@ -123,7 +123,7 @@ the [TensorKit manual](https://quantumkithub.github.io/TensorKit.jl/stable/man/s
 ## End-to-end walkthrough: spin-1/2 XXZ in the Sz=0 sector
 
 ```@example xxz
-using iTEBD, TensorKit
+using InfiniteTEBD, TensorKit
 
 # Build the U(1)-symmetric spin-1/2 operators (pre-assembled two-site forms)
 Sz, SzSz, SpSm, SmSp = spin_half_ops(:U1)

@@ -4,3 +4,5 @@ docs/build/
 .worktrees/
 benchmark_results/
 ScarFinder/
+docs/Manifest.toml
+bench/Manifest.toml

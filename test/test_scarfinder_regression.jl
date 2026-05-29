@@ -1,6 +1,6 @@
 using Test
 using LinearAlgebra
-using iTEBD
+using InfiniteTEBD
 
 if !isdefined(Main, :TestUtils)
     include(joinpath(@__DIR__, "test_utils.jl"))
@@ -17,7 +17,7 @@ using .TestUtils: pauli_matrices
     # The fallback path applies identity gates bond-by-bond, avoiding the
     # exponential tensor_group(ψ.Γ) call.
     ψ_large = product_iMPS(ComplexF64, fill([1, 0], 8))
-    @test_logs (:warn, r"Large unit cell detected") iTEBD._truncate_unitcell!(ψ_large, 2)
+    @test_logs (:warn, r"Large unit cell detected") InfiniteTEBD._truncate_unitcell!(ψ_large, 2)
     @test ψ_large.n == 8
     @test all(size(Γ, 1) <= 2 for Γ in ψ_large.Γ)
 
@@ -43,13 +43,13 @@ end
     target = -0.5
 
     ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
-    iTEBD._energy_fix!(ψ, h, 4; span=1, target=target, tol=1e-6, α=0.1, maxstep=50)
+    InfiniteTEBD._energy_fix!(ψ, h, 4; span=1, target=target, tol=1e-6, α=0.1, maxstep=50)
     E_final = energy_density(ψ, h; span=1)
     @test E_final ≈ target atol=1e-3
 
     # Symmetric case: pull the energy upward instead.
     ψ2 = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
-    iTEBD._energy_fix!(ψ2, h, 4; span=1, target=+0.5, tol=1e-6, α=0.1, maxstep=50)
+    InfiniteTEBD._energy_fix!(ψ2, h, 4; span=1, target=+0.5, tol=1e-6, α=0.1, maxstep=50)
     E_final2 = energy_density(ψ2, h; span=1)
     @test abs(E_final2 - 0.5) < 1e-3
 end
@@ -74,13 +74,13 @@ end
 
     ψ_copy = deepcopy(ψ)
     # With only 10 samples, it should still find a minimum
-    iTEBD._minimize_on_trajectory!(f, step!, ψ_copy, 10)
+    InfiniteTEBD._minimize_on_trajectory!(f, step!, ψ_copy, 10)
     @test ψ_copy.n == ψ.n
 
     # Early exit test: if objective stops improving, should not do all samples
     step_const! = ψ0 -> canonical!(ψ0)
     ψ_copy2 = deepcopy(ψ)
-    iTEBD._minimize_on_trajectory!(f, step_const!, ψ_copy2, 10)
+    InfiniteTEBD._minimize_on_trajectory!(f, step_const!, ψ_copy2, 10)
     @test ψ_copy2.n == ψ.n
 end
 
@@ -104,7 +104,7 @@ end
         return ψ0
     end
 
-    iTEBD._minimize_on_trajectory!(f, step!, ψ, length(values) - 1)
+    InfiniteTEBD._minimize_on_trajectory!(f, step!, ψ, length(values) - 1)
 
     @test trial_steps[] == length(values) - 1
     @test eval_count[] == length(values)
@@ -134,7 +134,7 @@ end
         return ψ0
     end
 
-    iTEBD._minimize_on_trajectory!(f, step!, ψ, 5)
+    InfiniteTEBD._minimize_on_trajectory!(f, step!, ψ, 5)
 
     @test eval_count[] == 6
     @test trial_steps[] == 5
@@ -151,7 +151,7 @@ end
     ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
     G = exp(-0.1 * P.Z)
     ψ_copy = deepcopy(ψ)
-    iTEBD._evolve_uniform!(ψ_copy, G; span=1, maxdim=4)
+    InfiniteTEBD._evolve_uniform!(ψ_copy, G; span=1, maxdim=4)
     @test ψ_copy.n == 2
     # For translationally invariant state, all sites should still be equivalent
     # (up to numerical noise)
@@ -159,7 +159,7 @@ end
 
     # Non-translationally invariant state should still work
     ψ2 = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
-    iTEBD._evolve_uniform!(ψ2, G; span=1, maxdim=4)
+    InfiniteTEBD._evolve_uniform!(ψ2, G; span=1, maxdim=4)
     @test ψ2.n == 2
 end
 
@@ -198,10 +198,10 @@ end
     # Test that scarfinder! with refine=true and refine_step=100 completes.
     # nstep=1 triggers a warning, so we test_logs for it.
     ψ_copy = deepcopy(ψ)
-    @test_logs (:warn, r"nstep = 1") iTEBD.scarfinder!(ψ_copy, h, dt, χ, N; refine=true, refine_step=100, nstep=1, maxdim=2)
+    @test_logs (:warn, r"nstep = 1") InfiniteTEBD.scarfinder!(ψ_copy, h, dt, χ, N; refine=true, refine_step=100, nstep=1, maxdim=2)
 
     # Test that calling without refine_step uses a small default (100) by
     # checking that the call completes in reasonable time.
     ψ_copy2 = deepcopy(ψ)
-    @test_logs (:warn, r"nstep = 1") iTEBD.scarfinder!(ψ_copy2, h, dt, χ, N; refine=true, nstep=1, maxdim=2)
+    @test_logs (:warn, r"nstep = 1") InfiniteTEBD.scarfinder!(ψ_copy2, h, dt, χ, N; refine=true, nstep=1, maxdim=2)
 end

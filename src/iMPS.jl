@@ -85,7 +85,7 @@ function _validate_iMPS_bonds(
 end
 
 # Fallback: no validation. Two intended consumers:
-#   1. The TensorKit extension (`ext/iTEBDTensorKitExt.jl`, added in Chunk 4)
+#   1. The TensorKit extension (`ext/InfiniteTEBDTensorKitExt.jl`, added in Chunk 4)
 #      specialises this on `Vector{<:AbstractTensorMap}` + `Vector{<:DiagonalTensorMap}`
 #      and performs sector-aware bond-space checks.
 #   2. Any non-dense, non-TensorKit user-supplied tensor type opts out of bond

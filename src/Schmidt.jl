@@ -199,9 +199,9 @@ function schmidt_canonical(
 
     # Left eigenvector
     Γc = copy(Γ)
-    iTEBD.tensor_rmul!(Γc, _safe_reciprocal(S_in; atol=ZEROTOL, rtol=0.0))
+    InfiniteTEBD.tensor_rmul!(Γc, _safe_reciprocal(S_in; atol=ZEROTOL, rtol=0.0))
     Γl = copy(Γc)
-    iTEBD.tensor_lmul!(S_in, Γl)
+    InfiniteTEBD.tensor_lmul!(S_in, Γl)
     L = steady_mat(Γl; dir=:l, tol, maxiter)
     el, vl = _positive_eigensystem(L; zerotol)
     bond_dim_l = size(vl, 1)

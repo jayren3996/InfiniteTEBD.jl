@@ -3,8 +3,8 @@ using LinearAlgebra
 using Logging
 using Printf
 using Random
-using iTEBD
-using iTEBD: iMPS, canonical!, schmidt_canonical
+using InfiniteTEBD
+using InfiniteTEBD: iMPS, canonical!, schmidt_canonical
 
 # Suppress the low-rank-compression warnings that fire during canonicalization
 # of random tensors; not relevant to the comparison.
@@ -46,7 +46,7 @@ end
 function truncate_single!(ψ::iMPS, chi_trunc::Int)
     ψ.Γ[:], ψ.λ[:] = schmidt_canonical(
         ψ.Γ, ψ.λ[end];
-        maxdim=chi_trunc, cutoff=iTEBD.SVDTOL, renormalize=true,
+        maxdim=chi_trunc, cutoff=InfiniteTEBD.SVDTOL, renormalize=true,
         noninjective=:ignore, symmetry_break=:none,
     )
     return ψ
@@ -56,13 +56,13 @@ function truncate_full!(ψ::iMPS, chi_trunc::Int)
     bond_before = length.(ψ.λ)
     ψ.Γ[:], ψ.λ[:] = schmidt_canonical(
         ψ.Γ, ψ.λ[end];
-        maxdim=chi_trunc, cutoff=iTEBD.SVDTOL, renormalize=true,
+        maxdim=chi_trunc, cutoff=InfiniteTEBD.SVDTOL, renormalize=true,
         noninjective=:ignore, symmetry_break=:none,
     )
     if length.(ψ.λ) != bond_before
         ψ.Γ[:], ψ.λ[:] = schmidt_canonical(
             ψ.Γ, ψ.λ[end];
-            maxdim=chi_trunc, cutoff=iTEBD.SVDTOL, renormalize=true,
+            maxdim=chi_trunc, cutoff=InfiniteTEBD.SVDTOL, renormalize=true,
             noninjective=:ignore, symmetry_break=:none,
         )
     end
@@ -73,7 +73,7 @@ function truncate_lq!(ψ::iMPS, chi_trunc::Int)
     bond_before = length.(ψ.λ)
     ψ.Γ[:], ψ.λ[:] = schmidt_canonical(
         ψ.Γ, ψ.λ[end];
-        maxdim=chi_trunc, cutoff=iTEBD.SVDTOL, renormalize=true,
+        maxdim=chi_trunc, cutoff=InfiniteTEBD.SVDTOL, renormalize=true,
         noninjective=:ignore, symmetry_break=:none,
     )
     if length.(ψ.λ) != bond_before
@@ -158,9 +158,9 @@ function main()
         rc_full = rc_error(ψ_full)
         rc_lq   = rc_error(ψ_lq)
 
-        fid_single = abs(iTEBD.inner_product(ψ_single, ψ_template))
-        fid_full   = abs(iTEBD.inner_product(ψ_full,   ψ_template))
-        fid_lq     = abs(iTEBD.inner_product(ψ_lq,     ψ_template))
+        fid_single = abs(InfiniteTEBD.inner_product(ψ_single, ψ_template))
+        fid_full   = abs(InfiniteTEBD.inner_product(ψ_full,   ψ_template))
+        fid_lq     = abs(InfiniteTEBD.inner_product(ψ_lq,     ψ_template))
 
         # Timing — each run starts from a fresh deepcopy.
         t_single = bench_time(() -> truncate_single!(deepcopy(ψ_template), chi_trunc))

@@ -1,22 +1,22 @@
 <p align="center">
-  <img src="docs/src/assets/logo.svg" alt="iTEBD.jl" width="180"/>
+  <img src="docs/src/assets/logo.svg" alt="InfiniteTEBD.jl" width="180"/>
 </p>
 
-<h1 align="center">iTEBD.jl</h1>
+<h1 align="center">InfiniteTEBD.jl</h1>
 
 <p align="center">
   <em>Infinite time-evolving block decimation for translationally invariant 1D quantum systems.</em>
 </p>
 
 <p align="center">
-  <a href="https://jayren3996.github.io/iTEBD.jl/dev/"><img alt="Documentation (dev)" src="https://img.shields.io/badge/docs-dev-blue.svg"/></a>
-  <a href="https://github.com/jayren3996/iTEBD.jl/actions/workflows/documentation.yml"><img alt="Documentation build status" src="https://github.com/jayren3996/iTEBD.jl/actions/workflows/documentation.yml/badge.svg"/></a>
+  <a href="https://jayren3996.github.io/InfiniteTEBD.jl/dev/"><img alt="Documentation (dev)" src="https://img.shields.io/badge/docs-dev-blue.svg"/></a>
+  <a href="https://github.com/jayren3996/InfiniteTEBD.jl/actions/workflows/documentation.yml"><img alt="Documentation build status" src="https://github.com/jayren3996/InfiniteTEBD.jl/actions/workflows/documentation.yml/badge.svg"/></a>
   <a href="https://julialang.org/"><img alt="Julia" src="https://img.shields.io/badge/made%20with-Julia-9558B2.svg?logo=julia"/></a>
 </p>
 
 ---
 
-`iTEBD.jl` targets the thermodynamic limit directly. Instead of running on a long finite chain, you specify a periodic unit cell and the package works with the resulting infinite matrix-product state. That makes it a natural fit when the quantity of interest (entanglement structure, bulk energy density, scar trajectories) is defined per unit cell rather than for a particular system size.
+`InfiniteTEBD.jl` targets the thermodynamic limit directly. Instead of running on a long finite chain, you specify a periodic unit cell and the package works with the resulting infinite matrix-product state. That makes it a natural fit when the quantity of interest (entanglement structure, bulk energy density, scar trajectories) is defined per unit cell rather than for a particular system size.
 
 The package stays narrow on purpose. It does not implement finite-size DMRG or mixed boundary conditions, and it assumes the injective setting throughout canonicalization. Optional Abelian-symmetric tensors (`:U1`, `:Z2`, …) are supported via a TensorKit-backed extension loaded with `using TensorKit`. If you need finite-size DMRG, [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) is a better starting point.
 
@@ -25,17 +25,19 @@ The package stays narrow on purpose. It does not implement finite-size DMRG or m
 From a Julia REPL:
 
 ```julia
-pkg> add https://github.com/jayren3996/iTEBD.jl
+pkg> add InfiniteTEBD
 ```
 
-Then load it with `using iTEBD`.
+Then load it with `using InfiniteTEBD`.
+
+> **Note on the name.** This library was previously distributed, unregistered, as `iTEBD`. Julia's General registry requires a package name with mixed case, so the registered package is `InfiniteTEBD`. The original [`iTEBD.jl`](https://github.com/jayren3996/iTEBD.jl) repository is kept as a thin compatibility shim that re-exports `InfiniteTEBD` — existing code that installs it by URL and calls `using iTEBD` keeps working unchanged. New code should use `InfiniteTEBD`.
 
 ## Quick start
 
 Imaginary-time iTEBD relaxes a random spin-1 state into the AKLT ground state in about a hundred Trotter steps:
 
 ```julia
-using iTEBD, LinearAlgebra
+using InfiniteTEBD, LinearAlgebra
 
 # Spin-1 operators
 X = sqrt(2)/2 * [0 1 0; 1 0 1; 0 1 0]
@@ -55,7 +57,7 @@ energy_density(psi, H)         # → ≈ 0.0  (AKLT ground state)
 maximum(length.(psi.λ))        # → 2      (converged bond dimension)
 ```
 
-A walkthrough of this example with more diagnostics is on the [Time Evolution](https://jayren3996.github.io/iTEBD.jl/dev/time-evolution/) page.
+A walkthrough of this example with more diagnostics is on the [Time Evolution](https://jayren3996.github.io/InfiniteTEBD.jl/dev/time-evolution/) page.
 
 ## Features
 
@@ -75,7 +77,7 @@ The single rule to remember: **the stored tensor has the right Schmidt values al
 B_i = Γ_i · λ_i
 ```
 
-so `psi.Γ[i]` returns the right-canonical tensor `B_i`, not the bare Vidal `Γ_i`. To get the Vidal pair, index the state: `Γ_i, λ_i = psi[i]`. The [States and Canonical Form](https://jayren3996.github.io/iTEBD.jl/dev/imps/) page explains this in detail.
+so `psi.Γ[i]` returns the right-canonical tensor `B_i`, not the bare Vidal `Γ_i`. To get the Vidal pair, index the state: `Γ_i, λ_i = psi[i]`. The [States and Canonical Form](https://jayren3996.github.io/InfiniteTEBD.jl/dev/imps/) page explains this in detail.
 
 ## ScarFinder
 
@@ -89,18 +91,18 @@ scarfinder!(ψ, G, χ, N; ...)        # gate-based, no energy correction
 scarfinder!(ψ, G, h, χ, N; ...)     # mixed: custom gate G, energy fixed against h
 ```
 
-The mixed form is the recommended one for constrained models like PXP, where the gate carries projectors that repair truncation artifacts while the energy target is defined against the unprojected Hamiltonian density. See the [ScarFinder Workflow](https://jayren3996.github.io/iTEBD.jl/dev/scarfinder/) page for the complete PXP example.
+The mixed form is the recommended one for constrained models like PXP, where the gate carries projectors that repair truncation artifacts while the energy target is defined against the unprojected Hamiltonian density. See the [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) page for the complete PXP example.
 
 ## Documentation
 
-Full manual at <https://jayren3996.github.io/iTEBD.jl/dev/>.
+Full manual at <https://jayren3996.github.io/InfiniteTEBD.jl/dev/>.
 
-- [Getting Started](https://jayren3996.github.io/iTEBD.jl/dev/getting-started/) — installation, the first state, sanity checks.
-- [States and Canonical Form](https://jayren3996.github.io/iTEBD.jl/dev/imps/) — the storage convention, `canonical!`, runnable examples.
-- [Time Evolution](https://jayren3996.github.io/iTEBD.jl/dev/time-evolution/) — `applygate!`, `evolve!`, Trotter order, adaptive bond dimension.
-- [Observables](https://jayren3996.github.io/iTEBD.jl/dev/observables/) — overlaps, expectation values, entropy, energy density.
-- [ScarFinder Workflow](https://jayren3996.github.io/iTEBD.jl/dev/scarfinder/) — the three interfaces, the two time scales, the PXP example.
-- [API Reference](https://jayren3996.github.io/iTEBD.jl/dev/api/) — generated from docstrings.
+- [Getting Started](https://jayren3996.github.io/InfiniteTEBD.jl/dev/getting-started/) — installation, the first state, sanity checks.
+- [States and Canonical Form](https://jayren3996.github.io/InfiniteTEBD.jl/dev/imps/) — the storage convention, `canonical!`, runnable examples.
+- [Time Evolution](https://jayren3996.github.io/InfiniteTEBD.jl/dev/time-evolution/) — `applygate!`, `evolve!`, Trotter order, adaptive bond dimension.
+- [Observables](https://jayren3996.github.io/InfiniteTEBD.jl/dev/observables/) — overlaps, expectation values, entropy, energy density.
+- [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) — the three interfaces, the two time scales, the PXP example.
+- [API Reference](https://jayren3996.github.io/InfiniteTEBD.jl/dev/api/) — generated from docstrings.
 
 The `examples/` directory contains runnable Jupyter notebooks: `CanonicalForm.ipynb`, `AKLT_GS.ipynb`, `PXP.ipynb`, `PXP_ScarFinder.ipynb`.
 
@@ -123,4 +125,4 @@ If the ScarFinder routines are useful in your published work, please cite:
 
 ## Acknowledgements
 
-`iTEBD.jl` builds on [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) / [`ITensorMPS.jl`](https://github.com/ITensor/ITensorMPS.jl) for tensor-network primitives, [`TensorOperations.jl`](https://github.com/Jutho/TensorOperations.jl) for contractions, and [`KrylovKit.jl`](https://github.com/Jutho/KrylovKit.jl) for the dominant transfer-matrix eigenvalue.
+`InfiniteTEBD.jl` builds on [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) / [`ITensorMPS.jl`](https://github.com/ITensor/ITensorMPS.jl) for tensor-network primitives, [`TensorOperations.jl`](https://github.com/Jutho/TensorOperations.jl) for contractions, and [`KrylovKit.jl`](https://github.com/Jutho/KrylovKit.jl) for the dominant transfer-matrix eigenvalue.

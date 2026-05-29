@@ -1,6 +1,6 @@
 using Test
-import iTEBD
-using iTEBD: adaptive_bonddim, natural_bonddim
+import InfiniteTEBD
+using InfiniteTEBD: adaptive_bonddim, natural_bonddim
 
 @testset "NATURAL_BONDDIM" begin
     @test natural_bonddim([1.0, 0.0, 0.0]; alpha=0.0) ≈ 1.0 atol=1e-12
@@ -79,5 +79,5 @@ end
     S = [0.5, 0.5, 1e-11]
     # After normalization, 1e-11 becomes ~2e-11, which is below cutoff=1e-10
     # So it should be dropped, giving entropy of log(2)
-    @test iTEBD.entanglement_entropy(S; cutoff=1e-10) ≈ log(2) atol=1e-8
+    @test InfiniteTEBD.entanglement_entropy(S; cutoff=1e-10) ≈ log(2) atol=1e-8
 end

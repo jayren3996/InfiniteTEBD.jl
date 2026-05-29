@@ -1,7 +1,7 @@
 using Test
 using LinearAlgebra
 using Random
-using iTEBD
+using InfiniteTEBD
 
 if !isdefined(Main, :TestUtils)
     include(joinpath(@__DIR__, "test_utils.jl"))

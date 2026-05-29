@@ -1,5 +1,5 @@
 using Test
-using iTEBD
+using InfiniteTEBD
 using TensorKit
 using LinearAlgebra
 using Random

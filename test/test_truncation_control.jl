@@ -1,7 +1,7 @@
 using Test
 using LinearAlgebra
-using iTEBD
-using iTEBD: product_iMPS, applygate!, evolve!
+using InfiniteTEBD
+using InfiniteTEBD: product_iMPS, applygate!, evolve!
 
 const H_GATE = inv(sqrt(2)) * [1.0 1.0; 1.0 -1.0]
 const CNOT_GATE = [
@@ -14,7 +14,7 @@ const BELL_GATE = CNOT_GATE * kron(H_GATE, I(2))
 
 @testset "DISCARDED_WEIGHT_SELECTOR" begin
     s = [4.0, 2.0, 1.0, 0.5]
-    choice = iTEBD._discarded_weight_choice(s; mindim=1, maxdim=4, truncerr=0.06)
+    choice = InfiniteTEBD._discarded_weight_choice(s; mindim=1, maxdim=4, truncerr=0.06)
 
     @test choice.chi_req == 2
     @test choice.chi_keep == 2
@@ -47,7 +47,7 @@ end
 
 @testset "SATURATION_IS_REPORTED" begin
     s = ones(3) ./ sqrt(3)
-    choice = iTEBD._discarded_weight_choice(s; mindim=1, maxdim=1, truncerr=0.1)
+    choice = InfiniteTEBD._discarded_weight_choice(s; mindim=1, maxdim=1, truncerr=0.1)
 
     @test choice.chi_req == 3
     @test choice.chi_keep == 1
@@ -68,7 +68,7 @@ end
     evolve!(psi_ref, gates, 20; maxdim=16, truncerr=1e-12)
     evolve!(psi_test, gates, 20; maxdim=8, truncerr=1e-6)
 
-    @test iTEBD.inner_product(psi_test, psi_ref) > 0.999
+    @test InfiniteTEBD.inner_product(psi_test, psi_ref) > 0.999
 end
 
 @testset "BOND_LOCAL_DIMENSIONS_CAN_DIFFER" begin

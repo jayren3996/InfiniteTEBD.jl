@@ -1,7 +1,7 @@
 #---------------------------------------------------------------------------------------------------
 # Symmetric stubs
 #
-# Names declared here are real-implemented inside `ext/iTEBDTensorKitExt.jl`. In
+# Names declared here are real-implemented inside `ext/InfiniteTEBDTensorKitExt.jl`. In
 # the base package they throw a clear message telling the user to `using
 # TensorKit` first. The extension shadows them with real methods automatically
 # when TensorKit is loaded.

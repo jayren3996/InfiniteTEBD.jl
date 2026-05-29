@@ -9,7 +9,7 @@ manual pages such as [iMPS and Canonical Form](imps.md),
 [Time Evolution](time-evolution.md), and [ScarFinder](scarfinder.md).
 
 ```@autodocs
-Modules = [iTEBD]
+Modules = [InfiniteTEBD]
 Private = false
 Order = [:type, :function]
 ```

@@ -1,5 +1,5 @@
 using Test
-using iTEBD
+using InfiniteTEBD
 
 @testset "DOCS_SCAFFOLD" begin
     root = dirname(@__DIR__)
@@ -9,7 +9,7 @@ using iTEBD
 end
 
 @testset "DOCS_BINDINGS" begin
-    @test haskey(Docs.meta(iTEBD), Docs.Binding(iTEBD, :canonical!))
+    @test haskey(Docs.meta(InfiniteTEBD), Docs.Binding(InfiniteTEBD, :canonical!))
 end
 
 @testset "DOCS_BUILD_SMOKE" begin

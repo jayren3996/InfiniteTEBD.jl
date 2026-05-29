@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
-  <!-- iTEBD.jl logo: 3-site iMPS unit cell with a 2-site gate.
+  <!-- InfiniteTEBD.jl logo: 3-site iMPS unit cell with a 2-site gate.
        Tensor circles use three Julia palette colors; the gate is a filled
        Julia-blue rounded square, the visual hero. Physical legs point up. -->
 

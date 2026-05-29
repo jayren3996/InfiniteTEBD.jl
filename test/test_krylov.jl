@@ -1,6 +1,6 @@
 using Test
 using LinearAlgebra
-using iTEBD
+using InfiniteTEBD
 
 if !isdefined(Main, :TestUtils)
     include(joinpath(@__DIR__, "test_utils.jl"))
@@ -13,8 +13,8 @@ using .TestUtils: deterministic_tensor
     ρ = deterministic_tensor(2, 2)
 
     for dir in (:r, :l)
-        direct = iTEBD.kraus(KL, KU, ρ; dir)
-        matrix_action = reshape(iTEBD.kraus_mat(KL, KU; dir) * vec(ρ), 2, 2)
+        direct = InfiniteTEBD.kraus(KL, KU, ρ; dir)
+        matrix_action = reshape(InfiniteTEBD.kraus_mat(KL, KU; dir) * vec(ρ), 2, 2)
         @test matrix_action ≈ direct atol=1e-12
     end
 end
@@ -22,7 +22,7 @@ end
 @testset "STEADY_MAT_SYMMETRIZES_BEFORE_HERMITIAN" begin
     # A tensor that produces a nearly non-Hermitian fixed point due to numerical noise
     K = deterministic_tensor(3, 2, 3) .+ 0.01im .* deterministic_tensor(3, 2, 3)
-    mat = iTEBD.steady_mat(K; dir=:r)
+    mat = InfiniteTEBD.steady_mat(K; dir=:r)
     @test mat isa Hermitian
     # Check that the matrix is truly symmetric
     M = Matrix(mat)
@@ -32,7 +32,7 @@ end
 @testset "KRYLOV_EIGEN_CONVERGENCE_CHECK" begin
     K = deterministic_tensor(2, 2, 2)
     # Should not warn for well-behaved tensor (just test it doesn't error)
-    @test iTEBD.krylov_eigen(K, conj(K); dir=:r) isa Tuple
+    @test InfiniteTEBD.krylov_eigen(K, conj(K); dir=:r) isa Tuple
 end
 
 @testset "KRYLOV_EIGEN_PRESERVES_MIXED_TRANSFER_EIGENVECTOR" begin
@@ -49,14 +49,14 @@ end
         0.5851136974491122 + 1.5004674770426478im 0.6133171675832304 - 0.33749865941784685im
     ]
 
-    λ, ρ = iTEBD.krylov_eigen(KL, KU; dir=:r)
+    λ, ρ = InfiniteTEBD.krylov_eigen(KL, KU; dir=:r)
 
-    @test norm(iTEBD.kraus(KL, KU, ρ; dir=:r) - λ * ρ) / (abs(λ) * norm(ρ)) < 1e-8
+    @test norm(InfiniteTEBD.kraus(KL, KU, ρ; dir=:r) - λ * ρ) / (abs(λ) * norm(ρ)) < 1e-8
 end
 
 @testset "KRYLOV_EIGEN_CAN_PROJECT_SELF_TRANSFER_TO_PSD" begin
     K = deterministic_tensor(2, 2, 2)
-    _, ρ = iTEBD.krylov_eigen(K, conj(K); dir=:r, project_psd=true)
+    _, ρ = InfiniteTEBD.krylov_eigen(K, conj(K); dir=:r, project_psd=true)
     evals = eigvals(Hermitian(ρ))
     @test all(evals .>= -1e-8)  # Allow tiny negative from numerical noise
 end
@@ -65,28 +65,28 @@ end
     KL = deterministic_tensor(2, 2, 3)
     KU = deterministic_tensor(3, 2, 2)
 
-    λ, ρ = iTEBD.krylov_eigen(KL, KU; dir=:r)
+    λ, ρ = InfiniteTEBD.krylov_eigen(KL, KU; dir=:r)
 
     @test size(ρ) == (3, 2)
-    @test vec(iTEBD.kraus(KL, KU, ρ; dir=:r)) ≈ λ * vec(ρ) rtol=1e-8
+    @test vec(InfiniteTEBD.kraus(KL, KU, ρ; dir=:r)) ≈ λ * vec(ρ) rtol=1e-8
 
-    λ_left, ρ_left = iTEBD.krylov_eigen(KL, KU; dir=:l)
+    λ_left, ρ_left = InfiniteTEBD.krylov_eigen(KL, KU; dir=:l)
 
     @test size(ρ_left) == (3, 2)
-    @test vec(iTEBD.kraus(KL, KU, ρ_left; dir=:l)) ≈ λ_left * vec(ρ_left) rtol=1e-8
+    @test vec(InfiniteTEBD.kraus(KL, KU, ρ_left; dir=:l)) ≈ λ_left * vec(ρ_left) rtol=1e-8
 end
 
 @testset "KRYLOV_EIGEN_VALIDATES_INITIAL_SHAPE_AND_PSD_PROJECTION" begin
     KL = deterministic_tensor(2, 2, 3)
     KU = deterministic_tensor(3, 2, 2)
 
-    @test_throws ArgumentError iTEBD.krylov_eigen(KL, KU, ones(2, 2); dir=:r)
-    @test_throws ArgumentError iTEBD.krylov_eigen(KL, KU; dir=:r, project_psd=true)
+    @test_throws ArgumentError InfiniteTEBD.krylov_eigen(KL, KU, ones(2, 2); dir=:r)
+    @test_throws ArgumentError InfiniteTEBD.krylov_eigen(KL, KU; dir=:r, project_psd=true)
 end
 
 @testset "FIXED_POINT_MAT_RANDOM_PSD_START" begin
     K = deterministic_tensor(2, 2, 2)
-    mat = iTEBD.fixed_point_mat(K; dir=:r)
+    mat = InfiniteTEBD.fixed_point_mat(K; dir=:r)
     @test mat isa Hermitian
     evals = eigvals(mat)
     @test all(evals .>= -1e-8)
@@ -95,7 +95,7 @@ end
 @testset "INNER_PRODUCT_SIZE_GATE" begin
     # Small transfer matrix should use dense eigen
     K = deterministic_tensor(2, 2, 2)
-    val = iTEBD.inner_product(K)
+    val = InfiniteTEBD.inner_product(K)
     @test val > 0
     @test isfinite(val)
 end
@@ -104,15 +104,15 @@ end
     K = ones(ComplexF64, 1, 1, 1)
     ρ = ones(ComplexF64, 1, 1)
 
-    @test_throws ErrorException iTEBD.kraus(K, K, ρ; dir=:sideways)
-    @test_throws ErrorException iTEBD.kraus_mat(K, K; dir=:sideways)
+    @test_throws ErrorException InfiniteTEBD.kraus(K, K, ρ; dir=:sideways)
+    @test_throws ErrorException InfiniteTEBD.kraus_mat(K, K; dir=:sideways)
 end
 
 @testset "STEADY_MAT_RETURNS_HERMITIAN_FIXED_POINT" begin
     K = ones(ComplexF64, 1, 1, 1)
 
-    right = iTEBD.steady_mat(K; dir=:r)
-    left = iTEBD.steady_mat(K; dir=:l)
+    right = InfiniteTEBD.steady_mat(K; dir=:r)
+    left = InfiniteTEBD.steady_mat(K; dir=:l)
 
     @test right isa Hermitian
     @test left isa Hermitian
@@ -126,10 +126,10 @@ end
     for a in (4, 8, 12, 16)
         K = deterministic_tensor(a, 2, a)
         for dir in (:r, :l)
-            ρ = Matrix(iTEBD.steady_mat(K; dir))
+            ρ = Matrix(InfiniteTEBD.steady_mat(K; dir))
             # Brute-force reference via direct eigendecomposition of the dense
             # transfer matrix.
-            m = iTEBD.kraus_mat(K, conj(K); dir)
+            m = InfiniteTEBD.kraus_mat(K, conj(K); dir)
             vals, vecs = eigen(m)
             idx = argmax(abs.(vals))
             ρ_ref = reshape(vecs[:, idx], a, a)
@@ -137,8 +137,8 @@ end
             ρ_ref = (ρ_ref + ρ_ref') / 2
             # Eigenvectors are defined up to scale; compare projected dominant
             # eigenvalue agreement instead of raw matrix equality.
-            λ = tr(ρ' * (iTEBD.kraus(K, conj(K), ρ; dir))) / tr(ρ' * ρ)
-            λ_ref = tr(ρ_ref' * (iTEBD.kraus(K, conj(K), ρ_ref; dir))) / tr(ρ_ref' * ρ_ref)
+            λ = tr(ρ' * (InfiniteTEBD.kraus(K, conj(K), ρ; dir))) / tr(ρ' * ρ)
+            λ_ref = tr(ρ_ref' * (InfiniteTEBD.kraus(K, conj(K), ρ_ref; dir))) / tr(ρ_ref' * ρ_ref)
             @test abs(λ) ≈ abs(λ_ref) rtol=1e-6
         end
     end

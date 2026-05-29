@@ -2,7 +2,7 @@ module TestUtils
 
 using LinearAlgebra
 using Test
-using iTEBD
+using InfiniteTEBD
 
 export AKLT_TENSOR
 export bell_gate, deterministic_tensor, pauli_matrices
@@ -53,7 +53,7 @@ function right_canonical_overlap(Γ::AbstractArray{<:Number, 3})
     return overlap
 end
 
-function right_canonical_error(ψ::iTEBD.iMPS)
+function right_canonical_error(ψ::InfiniteTEBD.iMPS)
     errs = Float64[]
     for Γ in ψ.Γ
         Dl = size(Γ, 1)
@@ -62,17 +62,17 @@ function right_canonical_error(ψ::iTEBD.iMPS)
     return maximum(errs)
 end
 
-function assert_normalized_schmidt_spectra(ψ::iTEBD.iMPS; atol::Real=1e-10)
+function assert_normalized_schmidt_spectra(ψ::InfiniteTEBD.iMPS; atol::Real=1e-10)
     @test all(all(λ .>= -atol) for λ in ψ.λ)
     @test all(isapprox(norm(λ), 1.0; atol) for λ in ψ.λ)
     return nothing
 end
 
-function assert_stored_tensor_convention(ψ::iTEBD.iMPS; atol::Real=1e-12)
+function assert_stored_tensor_convention(ψ::InfiniteTEBD.iMPS; atol::Real=1e-12)
     for i in 1:ψ.n
         Γbare, λ = ψ[i]
         stored = copy(Γbare)
-        iTEBD.tensor_rmul!(stored, λ)
+        InfiniteTEBD.tensor_rmul!(stored, λ)
         @test stored ≈ ψ.Γ[i] atol=atol
     end
     return nothing
