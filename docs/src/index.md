@@ -15,6 +15,13 @@ quantity you care about (entanglement structure, bulk energy density, scar
 trajectories) is defined per unit cell rather than for a particular system
 size.
 
+!!! note "Formerly the unregistered `iTEBD` package"
+    `InfiniteTEBD` is the registered republication of the package previously
+    distributed, unregistered, as `iTEBD`. The original
+    [`iTEBD.jl`](https://github.com/jayren3996/iTEBD.jl) repository is kept as a
+    compatibility shim that re-exports `InfiniteTEBD`, so existing `using iTEBD`
+    code keeps working — see [Getting Started](getting-started.md).
+
 The package deliberately stays narrow. It does not implement finite-size DMRG
 or mixed boundary conditions, and it assumes the injective setting throughout
 canonicalization. If you need finite-size DMRG, a package such as `ITensors.jl`

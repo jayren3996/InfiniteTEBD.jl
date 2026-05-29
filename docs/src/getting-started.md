@@ -14,6 +14,15 @@ Then load it with:
 using InfiniteTEBD
 ```
 
+!!! note "Coming from `iTEBD`?"
+    This package was previously distributed, unregistered, as `iTEBD`. Julia's
+    General registry requires a package name with mixed case, so the registered
+    package is `InfiniteTEBD`. The original
+    [`iTEBD.jl`](https://github.com/jayren3996/iTEBD.jl) repository is kept as a
+    thin compatibility shim that re-exports `InfiniteTEBD`, so existing code that
+    installs it by URL and calls `using iTEBD` keeps working unchanged. New code
+    should use `InfiniteTEBD`.
+
 ## Checking your install
 
 A quick sanity check: construct a small state, canonicalize it, and look at
