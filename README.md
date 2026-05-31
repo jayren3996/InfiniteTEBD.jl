@@ -16,9 +16,9 @@
 
 ---
 
-`InfiniteTEBD.jl` targets the thermodynamic limit directly. Instead of running on a long finite chain, you specify a periodic unit cell and the package works with the resulting infinite matrix-product state. That makes it a natural fit when the quantity of interest (entanglement structure, bulk energy density, scar trajectories) is defined per unit cell rather than for a particular system size.
+`InfiniteTEBD.jl` implements the time-evolving block decimation (TEBD) algorithm for infinite matrix-product states (iMPS). A state is specified by a periodic unit cell and represented directly in the thermodynamic limit, so no finite-size extrapolation from a long open chain is required. This representation is appropriate when the observables of interest (entanglement structure, bulk energy density, and scar trajectories) are properties of the unit cell rather than of a particular system size.
 
-The package stays narrow on purpose. It does not implement finite-size DMRG or mixed boundary conditions, and it assumes the injective setting throughout canonicalization. Optional Abelian-symmetric tensors (`:U1`, `:Z2`, …) are supported via a TensorKit-backed extension loaded with `using TensorKit`. If you need finite-size DMRG, [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) is a better starting point.
+The scope of the package is deliberately limited. It implements neither finite-size DMRG nor mixed boundary conditions, and canonicalization assumes an injective iMPS throughout. Abelian-symmetric tensors (`:U1`, `:Z2`, …) are supported through a TensorKit-based extension, loaded via `using TensorKit`. For finite-size DMRG, [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) is the more appropriate choice.
 
 ## Installation
 
