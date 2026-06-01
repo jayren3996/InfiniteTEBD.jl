@@ -57,7 +57,11 @@ canonical!(ψ; maxdim=MAXDIM, cutoff=SVDTOL, renormalize=true)
 
 The routine groups the unit cell into a single block, solves for the left and right transfer-matrix fixed points, performs the gauge SVD on the effective bond problem, truncates according to `maxdim` and `cutoff`, and writes the right-canonical tensors back into `ψ.Γ` and the Schmidt spectra into `ψ.λ`. If truncation changes any bond dimension, a second pass restores the exact right-canonical gauge that a single truncated SVD only achieves approximately. The state is mutated in place and the same object is returned.
 
-The injective-setting caveat: this canonicalization path assumes a non-degenerate transfer spectrum. For symmetry-broken or block-diagonal states (GHZ-like, spontaneously broken `Z_2`, …) see the `noninjective` and `symmetry_break` keywords in [`canonical!`](@ref).
+!!! warning "Injective setting"
+    This canonicalization path assumes a non-degenerate transfer spectrum. For
+    symmetry-broken or block-diagonal states (GHZ-like, spontaneously broken
+    `Z_2`, …) see the `noninjective` and `symmetry_break` keywords in
+    [`canonical!`](@ref).
 
 ## Choosing the keywords
 
@@ -67,7 +71,10 @@ For a healthy injective state the defaults are fine and you can ignore the keywo
 - `cutoff` — tighten it (e.g. `1e-14`) to discard tiny Schmidt tails for cleaner entanglement spectra; loosen it (e.g. `1e-8`) when speed matters more than the last few digits.
 - `renormalize` — keep `true` for normal use. After non-trivial truncation the retained spectrum is rescaled to unit norm, which is what almost every downstream routine expects.
 
-Pitfall: an aggressive `cutoff` or small `maxdim` produces a genuinely truncated state. The bare Vidal tensor reconstructed by `ψ[i]` afterwards is the Vidal tensor *of that truncated state*, not of the original.
+!!! warning "Truncation changes the state"
+    An aggressive `cutoff` or small `maxdim` produces a genuinely truncated
+    state. The bare Vidal tensor reconstructed by `ψ[i]` afterwards is the Vidal
+    tensor *of that truncated state*, not of the original.
 
 ## Constructors
 

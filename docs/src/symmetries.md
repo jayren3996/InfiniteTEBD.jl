@@ -6,8 +6,11 @@ combination of these — without ever leaving the `iMPS` API you already know.
 
 This page assumes you have run the dense examples in
 [States and Canonical Form](imps.md) and now want to take advantage of a
-symmetry your model has. **You do not need any prior experience with
-TensorKit.**
+symmetry your model has.
+
+!!! tip "No TensorKit experience needed"
+    You do not need any prior experience with TensorKit. The sections below
+    introduce charges, flux, and arrow conventions from zero.
 
 ## What you gain
 

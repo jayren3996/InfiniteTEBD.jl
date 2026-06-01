@@ -8,12 +8,11 @@ a featureless low-energy state.
 
 `InfiniteTEBD.jl` exposes three entry points:
 
-- `scarfinder!(ψ, h, dt, χ, N; ...)` builds `exp(-1im * dt * h)` from the local
-  Hamiltonian density `h` and uses it as the real-time gate.
-- `scarfinder!(ψ, G, χ, N; ...)` applies a user-supplied gate `G` with no
-  energy correction.
-- `scarfinder!(ψ, G, h, χ, N; ...)` applies a user-supplied gate `G` but
-  measures the energy drift against `h`.
+| Signature | Real-time gate | Energy correction | Typical use |
+|-----------|----------------|-------------------|-------------|
+| `scarfinder!(ψ, h, dt, χ, N; ...)` | `exp(-1im * dt * h)`, built internally | optional, against `h` | you have only the local density `h` |
+| `scarfinder!(ψ, G, χ, N; ...)` | user-supplied `G` | none | `G` is a prebuilt or Floquet step |
+| `scarfinder!(ψ, G, h, χ, N; ...)` | user-supplied `G` | optional, against `h` | constrained models such as PXP |
 
 Each iteration has the same shape: real-time evolution at a temporary
 bond dimension `maxdim`, projection back to `χ`, and an optional imaginary-time

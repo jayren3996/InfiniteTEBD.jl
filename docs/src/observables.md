@@ -3,12 +3,14 @@
 This page covers the measurement routines that act on a translationally
 invariant [`iMPS`](@ref). From a canonicalized state you can compute:
 
-- Self-norms and cross overlaps with [`inner_product`](@ref).
-- Single-site and multi-site expectation values with [`expect`](@ref).
-- Bipartite entanglement entropy across any bond with [`ent_S`](@ref).
-- Unit-cell averaged energy density with [`energy_density`](@ref).
-- Reachable low- and high-energy brackets with [`energy_span`](@ref).
-- The operator support inferred from `size(O)` with [`operator_span`](@ref).
+| Function | Returns |
+|----------|---------|
+| [`inner_product`](@ref) | self-norm per unit cell, or the overlap of two states |
+| [`expect`](@ref) | single-site and multi-site expectation values |
+| [`ent_S`](@ref) | bipartite entanglement entropy across any bond |
+| [`energy_density`](@ref) | unit-cell averaged energy density of a local term |
+| [`energy_span`](@ref) | reachable low- and high-energy brackets |
+| [`operator_span`](@ref) | operator support inferred from `size(O)` |
 
 The signatures and edge-case behavior are documented in the
 [API Reference](api.md).

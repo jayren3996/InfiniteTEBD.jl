@@ -12,6 +12,7 @@
   <a href="https://jayren3996.github.io/InfiniteTEBD.jl/dev/"><img alt="Documentation (dev)" src="https://img.shields.io/badge/docs-dev-blue.svg"/></a>
   <a href="https://github.com/jayren3996/InfiniteTEBD.jl/actions/workflows/documentation.yml"><img alt="Documentation build status" src="https://github.com/jayren3996/InfiniteTEBD.jl/actions/workflows/documentation.yml/badge.svg"/></a>
   <a href="https://julialang.org/"><img alt="Julia" src="https://img.shields.io/badge/made%20with-Julia-9558B2.svg?logo=julia"/></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"/></a>
 </p>
 
 ---
@@ -19,24 +20,6 @@
 `InfiniteTEBD.jl` implements the time-evolving block decimation (TEBD) algorithm for infinite matrix-product states (iMPS). A state is specified by a periodic unit cell and represented directly in the thermodynamic limit, so no finite-size extrapolation from a long open chain is required. This representation is appropriate when the observables of interest (entanglement structure, bulk energy density, and scar trajectories) are properties of the unit cell rather than of a particular system size.
 
 The scope of the package is deliberately limited. It implements neither finite-size DMRG nor mixed boundary conditions, and canonicalization assumes an injective iMPS throughout. Abelian-symmetric tensors (`:U1`, `:Z2`, …) are supported through a TensorKit-based extension, loaded via `using TensorKit`. For finite-size DMRG, [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) is the more appropriate choice.
-
-## Installation
-
-`InfiniteTEBD` is **awaiting registration** in Julia's General registry. Until that lands, install it directly from GitHub:
-
-```julia
-pkg> add https://github.com/jayren3996/InfiniteTEBD.jl
-```
-
-After it is registered, the standard by-name install will work too (**not available yet**):
-
-```julia
-pkg> add InfiniteTEBD
-```
-
-Then load it with `using InfiniteTEBD`.
-
-> **Note on the name.** This library was previously distributed, unregistered, as `iTEBD`. Julia's General registry requires a package name with mixed case, so the registered package is `InfiniteTEBD`. The original [`iTEBD.jl`](https://github.com/jayren3996/iTEBD.jl) repository is kept as a thin compatibility shim that re-exports `InfiniteTEBD` — existing code that installs it by URL and calls `using iTEBD` keeps working unchanged. New code should use `InfiniteTEBD`.
 
 ## Quick start
 
@@ -65,15 +48,50 @@ maximum(length.(psi.λ))        # → 2      (converged bond dimension)
 
 A walkthrough of this example with more diagnostics is on the [Time Evolution](https://jayren3996.github.io/InfiniteTEBD.jl/dev/time-evolution/) page.
 
-## Features
+## What you can do
 
-- Infinite matrix-product states with arbitrary periodic unit cells.
-- Local-gate updates with a discarded-weight truncation controller (`applygate!`, `evolve!`).
-- Trotter helpers for second-order Strang splitting and two fourth-order schemes (`trotter_gates`).
-- Schmidt canonicalization in the injective setting (`canonical!`).
-- Transfer-matrix overlaps, multi-site expectation values, entanglement entropy, energy density (`inner_product`, `expect`, `ent_S`, `energy_density`, `energy_span`).
-- ScarFinder workflow for low-entanglement state search, with Hamiltonian, gate, and mixed `gate + Hamiltonian` interfaces (`scarfinder!`).
-- Optional adaptive bond-dimension policy as a ratchet on bond growth (`adaptive_bonddim`, `natural_bonddim`).
+- **Infinite matrix-product states** with arbitrary periodic unit cells.
+- **Local-gate evolution** with a discarded-weight truncation controller (`applygate!`, `evolve!`).
+- **Trotter helpers** for second-order Strang splitting and two fourth-order schemes (`trotter_gates`).
+- **Schmidt canonicalization** in the injective setting (`canonical!`).
+- **Observables** from the unit-cell transfer matrix: overlaps, multi-site expectation values, entanglement entropy, and energy density (`inner_product`, `expect`, `ent_S`, `energy_density`, `energy_span`).
+- **ScarFinder search** for low-entanglement trajectories, with Hamiltonian, gate, and mixed gate-plus-Hamiltonian interfaces (`scarfinder!`).
+- **Abelian-symmetric tensors** (`:U1`, `:Z2`, and products) through the optional TensorKit extension.
+- **Adaptive bond dimension** as a ratchet on bond growth (`adaptive_bonddim`, `natural_bonddim`).
+
+## Choose your path
+
+| If you want to … | Start with |
+|------------------|------------|
+| Build your first infinite MPS | [Getting Started](https://jayren3996.github.io/InfiniteTEBD.jl/dev/getting-started/) → [States and Canonical Form](https://jayren3996.github.io/InfiniteTEBD.jl/dev/imps/) |
+| Evolve a state in real or imaginary time | [Time Evolution](https://jayren3996.github.io/InfiniteTEBD.jl/dev/time-evolution/) |
+| Measure energy, entropy, or overlaps | [Observables](https://jayren3996.github.io/InfiniteTEBD.jl/dev/observables/) |
+| Exploit a U(1) or Zₙ symmetry | [Symmetric infinite MPS](https://jayren3996.github.io/InfiniteTEBD.jl/dev/symmetries/) |
+| Search for low-entanglement scar trajectories | [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) |
+| Look up exact signatures and defaults | [API Reference](https://jayren3996.github.io/InfiniteTEBD.jl/dev/api/) |
+
+## Installation
+
+`InfiniteTEBD` is **awaiting registration** in Julia's General registry. Until that lands, install it directly from GitHub:
+
+```julia
+pkg> add https://github.com/jayren3996/InfiniteTEBD.jl
+```
+
+After it is registered, the standard by-name install will work too (**not available yet**):
+
+```julia
+pkg> add InfiniteTEBD
+```
+
+Then load it with `using InfiniteTEBD`.
+
+Compatibility:
+
+- Julia `1.10+`.
+- `TensorKit.jl` `0.16`, needed only for the symmetric extension.
+
+> **Note on the name.** This library was previously distributed, unregistered, as `iTEBD`. Julia's General registry requires a package name with mixed case, so the registered package is `InfiniteTEBD`. The original [`iTEBD.jl`](https://github.com/jayren3996/iTEBD.jl) repository is kept as a thin compatibility shim that re-exports `InfiniteTEBD` — existing code that installs it by URL and calls `using iTEBD` keeps working unchanged. New code should use `InfiniteTEBD`.
 
 ## iMPS convention
 
@@ -99,12 +117,30 @@ scarfinder!(ψ, G, h, χ, N; ...)     # mixed: custom gate G, energy fixed again
 
 The mixed form is the recommended one for constrained models like PXP, where the gate carries projectors that repair truncation artifacts while the energy target is defined against the unprojected Hamiltonian density. See the [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) page for the complete PXP example.
 
+## Repository map
+
+| Path | What lives there |
+|------|------------------|
+| [`src/InfiniteTEBD.jl`](src/InfiniteTEBD.jl) | Top-level module; includes and re-exports the public API |
+| [`src/iMPS.jl`](src/iMPS.jl) | The `iMPS` type, constructors, `canonical!`, `expect`, `ent_S` |
+| [`src/Gate.jl`](src/Gate.jl) | Local-gate updates and Trotter helpers (`applygate!`, `evolve!`, `trotter_gates`) |
+| [`src/Schmidt.jl`](src/Schmidt.jl) | Schmidt decomposition and the discarded-weight truncation controller |
+| [`src/Contractions.jl`](src/Contractions.jl), [`src/TensorAlgebra.jl`](src/TensorAlgebra.jl) | Transfer-matrix factors and the low-level tensor contractions |
+| [`src/Krylov.jl`](src/Krylov.jl) | Dominant transfer-matrix eigenvalue via KrylovKit |
+| [`src/ScarFinder.jl`](src/ScarFinder.jl) | `scarfinder!`, `energy_density`, `energy_span`, `operator_span` |
+| [`src/Miscellaneous.jl`](src/Miscellaneous.jl) | `inner_product` and the adaptive bond-dimension helpers |
+| [`src/SymmetricStubs.jl`](src/SymmetricStubs.jl) | Entry points for the symmetric API that require TensorKit |
+| [`ext/InfiniteTEBDTensorKitExt.jl`](ext/InfiniteTEBDTensorKitExt.jl) | TensorKit-backed Abelian-symmetric implementation |
+| [`docs/`](docs) | Documenter manual and worked examples |
+| [`examples/`](examples) | Runnable Jupyter notebooks |
+
 ## Documentation
 
 Full manual at <https://jayren3996.github.io/InfiniteTEBD.jl/dev/>.
 
 - [Getting Started](https://jayren3996.github.io/InfiniteTEBD.jl/dev/getting-started/) — installation, the first state, sanity checks.
 - [States and Canonical Form](https://jayren3996.github.io/InfiniteTEBD.jl/dev/imps/) — the storage convention, `canonical!`, runnable examples.
+- [Symmetric infinite MPS](https://jayren3996.github.io/InfiniteTEBD.jl/dev/symmetries/) — Abelian U(1)/Zₙ tensors via the TensorKit extension.
 - [Time Evolution](https://jayren3996.github.io/InfiniteTEBD.jl/dev/time-evolution/) — `applygate!`, `evolve!`, Trotter order, adaptive bond dimension.
 - [Observables](https://jayren3996.github.io/InfiniteTEBD.jl/dev/observables/) — overlaps, expectation values, entropy, energy density.
 - [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) — the three interfaces, the two time scales, the PXP example.

@@ -64,6 +64,12 @@ returns one macro-step as a vector of `(G, i, j)` tuples.
 
 Three schemes are available:
 
+| `trotter` | Order | Layers | Evolution | Substeps per macro-step |
+|-----------|-------|--------|-----------|-------------------------|
+| `:second` | 2 | any | real or imaginary | one Strang sweep |
+| `:fourth_opt` | 4 | exactly two | real only | eleven elementary substeps |
+| `:fourth` | 4 | any | real only | five Strang sweeps |
+
 - `trotter=:second` — Strang splitting on any number of layers. Required for
   imaginary-time evolution. A sensible default for ground-state search.
 - `trotter=:fourth_opt` — Barthel-Zhang optimized fourth-order formula for

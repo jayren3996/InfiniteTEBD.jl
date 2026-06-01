@@ -1,5 +1,8 @@
 # Getting started
 
+This page installs the package, runs a one-line sanity check, and builds your
+first `iMPS` with `rand_iMPS` and `product_iMPS`.
+
 ## Installation
 
 `InfiniteTEBD` is **awaiting registration** in Julia's General registry. Until that lands, install it directly from GitHub:

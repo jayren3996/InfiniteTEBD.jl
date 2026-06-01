@@ -6,14 +6,18 @@
 
 # InfiniteTEBD.jl
 
-`InfiniteTEBD.jl` is a Julia package for infinite time-evolving block decimation on
-translationally invariant one-dimensional quantum systems. It targets the
-thermodynamic limit directly: instead of a long finite chain with open or
-periodic boundaries, you specify a periodic unit cell and the package works
-with the resulting infinite matrix-product state. This is convenient when the
-quantity you care about (entanglement structure, bulk energy density, scar
-trajectories) is defined per unit cell rather than for a particular system
-size.
+`InfiniteTEBD.jl` implements the time-evolving block decimation (TEBD) algorithm
+for infinite matrix-product states (iMPS). A state is specified by a periodic
+unit cell and represented directly in the thermodynamic limit, so no
+finite-size extrapolation from a long open chain is required. This
+representation is appropriate when the observables of interest (entanglement
+structure, bulk energy density, and scar trajectories) are properties of the
+unit cell rather than of a particular system size.
+
+This site is the narrative manual: it explains the storage conventions and the
+main workflows, with runnable examples throughout. The source docstrings,
+collected on the [API Reference](api.md) page, are the precise reference for
+signatures and keyword defaults.
 
 !!! note "Formerly the unregistered `iTEBD` package"
     `InfiniteTEBD` is the registered republication of the package previously
@@ -22,44 +26,19 @@ size.
     compatibility shim that re-exports `InfiniteTEBD`, so existing `using iTEBD`
     code keeps working — see [Getting Started](getting-started.md).
 
-The package deliberately stays narrow. It does not implement finite-size DMRG
-or mixed boundary conditions, and it assumes the injective setting throughout
-canonicalization. If you need finite-size DMRG, a package such as `ITensors.jl`
-is a better starting point. What you do get here is a compact `iMPS` type,
-explicit control over truncation and Trotter order, and a ScarFinder routine
-for low-entanglement search inside the iMPS manifold. Optional Abelian-symmetric
-tensors (`:U1`, `:Z2`, ...) are supported via a TensorKit-backed extension — see
-the [Symmetric infinite MPS](@ref) page.
+## Choose a path
 
-## Manual layout
+| If you want to … | Start with |
+|------------------|------------|
+| Build your first infinite MPS | [Getting Started](getting-started.md) → [States and Canonical Form](imps.md) |
+| Evolve a state in real or imaginary time | [Time Evolution](time-evolution.md) |
+| Measure energy, entropy, or overlaps | [Observables](observables.md) |
+| Exploit a U(1) or Zₙ symmetry | [Symmetric infinite MPS](symmetries.md) |
+| Search for low-entanglement scar trajectories | [ScarFinder Workflow](scarfinder.md) |
+| Look up exact signatures and defaults | [API Reference](api.md) |
 
-The manual is organized around the package's main workflows. Each page is
-written for human readers and emphasizes conventions, caveats, and runnable
-examples; the API reference is generated from the docstrings and lists exact
-signatures and defaults.
-
-- [Getting Started](getting-started.md) covers installation and how to build a
-  first state with `rand_iMPS` or `product_iMPS`.
-- [iMPS and Canonical Form](imps.md) explains the storage convention — in
-  particular, that `ψ.Γ[i]` holds the right-canonical tensor `B_i = Γ_i λ_i`
-  rather than the bare Vidal `Γ_i` — and what `canonical!` does to a state.
-- [Time Evolution](time-evolution.md) describes `applygate!` for single
-  updates, `evolve!` for repeated sweeps, the layered Trotter interface
-  (`:second`, `:fourth`, `:fourth_opt`), and the adaptive bond-dimension
-  helpers `natural_bonddim` and `adaptive_bonddim`.
-- [Observables](observables.md) covers transfer-matrix overlaps with
-  `inner_product`, expectation values with `expect`, entanglement entropy with
-  `ent_S`, and `energy_density` / `energy_span` for local Hamiltonians.
-- [ScarFinder](scarfinder.md) documents the three `scarfinder!` interfaces
-  (Hamiltonian, gate, mixed), how the two time scales `dt` and `nstep` combine,
-  and a complete PXP example.
-- [API Reference](api.md) gives the docstring-driven signature list, including
-  keyword defaults and the constants `MAXDIM` and `SVDTOL`.
-
-A reasonable reading order for a new user is Getting Started → iMPS and
-Canonical Form → Time Evolution → Observables, then ScarFinder if you need the
-low-entanglement search routines and the API Reference when you want exact
-signatures.
+A typical reading order is Getting Started → States and Canonical Form → Time
+Evolution → Observables, then ScarFinder and the API Reference as needed.
 
 ## A minimal example
 
@@ -84,17 +63,17 @@ canonical!(psi)
 
 After `canonical!`, the stored tensors `psi.Γ[i]` are right-canonical and the
 entanglement structure on each bond is carried explicitly by `psi.λ[i]`. See
-[iMPS and Canonical Form](imps.md) for the full convention and
+[States and Canonical Form](imps.md) for the full convention and
 [Time Evolution](time-evolution.md) for how local gates are applied on top of
 this representation.
 
 ## Package scope
 
-`InfiniteTEBD.jl` is intentionally direct. You specify the unit cell, the local
-operators, and the truncation settings (`maxdim`, `cutoff`) explicitly. There
-is no automatic Hamiltonian builder, no DMRG, and no non-Abelian
-quantum-number bookkeeping. Optional Abelian-symmetric tensors (U(1), Z_N,
-products) are available through the TensorKit-backed extension on the
-[Symmetric infinite MPS](@ref) page. That keeps the core small enough to read
-end-to-end and flexible for exploratory tensor-network work and custom
-ScarFinder protocols.
+`InfiniteTEBD.jl` is intentionally direct: the unit cell, the local operators,
+and the truncation settings (`maxdim`, `cutoff`) are all specified explicitly.
+There is no automatic Hamiltonian builder, no finite-size DMRG, and no
+non-Abelian quantum-number bookkeeping. Abelian-symmetric tensors (U(1), Z_N,
+and products) are available through the TensorKit-based extension documented on
+the [Symmetric infinite MPS](@ref) page. The core stays small enough to read
+end to end, which suits exploratory tensor-network work and custom ScarFinder
+protocols.
