@@ -72,13 +72,7 @@ A walkthrough of this example with more diagnostics is on the [Time Evolution](h
 
 ## Installation
 
-`InfiniteTEBD` is **awaiting registration** in Julia's General registry. Until that lands, install it directly from GitHub:
-
-```julia
-pkg> add https://github.com/jayren3996/InfiniteTEBD.jl
-```
-
-After it is registered, the standard by-name install will work too (**not available yet**):
+`InfiniteTEBD` is registered in Julia's General registry, so install it by name:
 
 ```julia
 pkg> add InfiniteTEBD
