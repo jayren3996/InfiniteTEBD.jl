@@ -19,8 +19,8 @@ InfiniteTEBDTensorKitExt = "TensorKit"
 
 [compat]
 ITensorMPS = "0.3"
-ITensors = "0.7, 0.8"
-KrylovKit = "0.8, 0.9"
+ITensors = "0.7, 0.8, 0.9"
+KrylovKit = "0.8, 0.9, 0.10"
 PrecompileTools = "1"
 TensorKit = "0.16"
 TensorOperations = "5"
