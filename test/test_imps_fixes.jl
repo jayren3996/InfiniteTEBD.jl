@@ -24,11 +24,16 @@ end
 
 @testset "IMPS2MPS_REPEATS_UNIT_CELL_TO_REQUESTED_LENGTH" begin
     ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
-    sites = [Index(2, "site=$i") for i in 1:5]
+    sites = [Index(2, "site=$i") for i in 1:6]
     mps = InfiniteTEBD.imps2mps(ψ, sites; L=length(sites))
 
     @test mps isa ITensorMPS.AbstractMPS
     @test length(mps) == length(sites)
+
+    # A window that covers a partial unit cell would glue mismatched Schmidt
+    # bases at its edge, so it is rejected rather than silently produced.
+    sites_odd = [Index(2, "site=$i") for i in 1:5]
+    @test_throws ArgumentError InfiniteTEBD.imps2mps(ψ, sites_odd; L=length(sites_odd))
 end
 
 @testset "IMPS2MPS_L1_DISTINCT_BOUNDARY_INDICES" begin
