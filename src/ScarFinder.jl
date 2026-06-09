@@ -79,10 +79,14 @@ function _evolve_uniform!(ψ::iMPS, G::AbstractMatrix; span::Integer, maxdim::In
     # This reduces O(n) gate applications to O(1) when all sites are identical.
     # Note: truncation may break exact translational invariance, so this is
     # guarded by an approximate equality check.
+    # isapprox on arrays of unequal size throws DimensionMismatch rather than
+    # returning false, and bond dimensions routinely differ across bonds after
+    # truncation — guard each comparison with a size check so non-uniform
+    # states take the generic path instead of crashing.
     is_uniform = span == 1 &&
                  ψ.n > 1 &&
-                 all(ψ.λ[1] ≈ ψ.λ[i] for i in 2:ψ.n) &&
-                 all(ψ.Γ[1] ≈ ψ.Γ[i] for i in 2:ψ.n)
+                 all(size(ψ.λ[1]) == size(ψ.λ[i]) && ψ.λ[1] ≈ ψ.λ[i] for i in 2:ψ.n) &&
+                 all(size(ψ.Γ[1]) == size(ψ.Γ[i]) && ψ.Γ[1] ≈ ψ.Γ[i] for i in 2:ψ.n)
     if is_uniform
         applygate!(ψ, G, 1, mod(1 + offset - 1, ψ.n) + 1; maxdim)
         for i in 2:ψ.n
@@ -121,10 +125,13 @@ Notes:
 """
 function _truncate_unitcell!(ψ::iMPS, χ::Integer; cutoff::Real=SVDTOL)
     if ψ.n == 1
-        Γ, λ = schmidt_canonical(ψ.Γ[1], ψ.λ[1]; maxdim=χ, cutoff, renormalize=true)
-        tensor_lmul!(λ, Γ)
-        ψ.Γ[1] = Γ
-        ψ.λ[1] = λ
+        # canonical! routes through the vector schmidt_canonical wrapper,
+        # whose isone(n) path finishes with the right-canonical trace
+        # normalization. The previous code called the scalar kernel — which
+        # already returns the stored-convention tensor B = Γ·λ — and then
+        # applied tensor_lmul!(λ, Γ) on top, silently storing λ·B: an extra
+        # diag(λ) on every bond of the infinite chain, not a gauge change.
+        canonical!(ψ; maxdim=χ, cutoff, renormalize=true)
         return ψ
     end
 

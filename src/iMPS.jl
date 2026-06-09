@@ -334,7 +334,10 @@ Keyword arguments:
   Singular values smaller than this threshold are discarded during
   canonicalization.
 - `renormalize=true`
-  If `true`, renormalize the retained Schmidt values after truncation.
+  If `true`, renormalize the retained Schmidt values after truncation. With
+  `renormalize=false` the stored tensors keep the state's original norm, while
+  the Schmidt spectra `ψ.λ` are still stored in the canonical unit-norm
+  convention (`Σλ² = 1` up to genuinely discarded truncation weight).
 - `noninjective=:warn`
   Policy for likely non-injective or degenerate transfer spectra. Supported
   values are `:warn`, `:error`, and `:ignore`.
@@ -463,6 +466,7 @@ function getindex(mps::DenseIMPS{T,S}, i::Integer) where {T,S}
     Γ, copy(λ_internal)
 end
 #---------------------------------------------------------------------------------------------------
+export mps_promote_type
 """
     mps_promote_type(T, mps)
 
@@ -479,7 +483,10 @@ Returns:
 
 Notes:
 - The Schmidt spectra are reused unchanged.
-- This is an internal helper used when adapting tensor element types.
+- The element type of an `iMPS` is fixed at construction, so in-place routines
+  like [`applygate!`](@ref) cannot promote a real state to complex. Use this
+  to convert a state before real-time evolution, e.g.
+  `psi = mps_promote_type(ComplexF64, psi)`.
 """
 function mps_promote_type(
     T::DataType,
@@ -556,10 +563,17 @@ val = expect(psi, kron(Z, Z), 1, 2)
 ```
 """
 function expect(ψ::iMPS, O::AbstractMatrix, i::Integer, j::Integer)
-    inds = j >= i ? collect(i:j) : [i:ψ.n; 1:j]
+    # Wrap the site indices periodically, exactly as applygate! does, so e.g.
+    # expect(ψ, h, n, n + 1) measures the wraparound bond instead of throwing.
+    i0, j0 = _normalize_gate_sites(ψ, i, j)
+    inds = _gate_indices(ψ, i0, j0)
     Γ = ψ.Γ[inds]
-    λl = ψ.λ[mod(i-2,ψ.n)+1]
-    ocontract(Γ, O, λl) |> real
+    λl = ψ.λ[mod(i0-2,ψ.n)+1]
+    # Same boundary conversion as applygate!: user operators follow the
+    # documented kron convention (leftmost site ↔ leftmost factor), while the
+    # fused-leg contraction puts the leftmost site's index fastest.
+    O_int = _operator_to_internal(O, Int[size(Γk, 2) for Γk in Γ])
+    ocontract(Γ, O_int, λl) |> real
 end
 
 
@@ -583,7 +597,10 @@ Notes:
   vectors.
 """
 function conj(mps::iMPS)
-    Γ_new = [conj(B) for B in mps.Γ]
+    # conj.(B) rather than conj(B): for real element types Base.conj on an
+    # array is the identity and would alias the input state's storage, so
+    # later in-place gates on the "copy" would silently mutate the original.
+    Γ_new = [conj.(B) for B in mps.Γ]
     λ_new = [copy(s) for s in mps.λ]
     iMPS(Γ_new, λ_new, mps.n)
 end
