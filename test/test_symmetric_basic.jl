@@ -1,6 +1,10 @@
 using Test
 using InfiniteTEBD
-using LinearAlgebra: I, norm, tr, Diagonal, eigen, Hermitian
+# `diag` is used by the `_diag_inverse cutoff floor` testset below; import it
+# explicitly so this file also passes when run standalone or in a subset
+# (in full-suite runs earlier unit files leak `diag` into Main via their
+# unqualified `using LinearAlgebra`, masking the missing import).
+using LinearAlgebra: I, norm, tr, diag, Diagonal, eigen, Hermitian
 using Random
 
 # Explicit imports from TensorKit to avoid name conflicts with ITensors
@@ -88,12 +92,19 @@ end
 
 @testset "rand_iMPS symmetric (raw spaces)" begin
     P = graded_space(:U1, 1=>1, -1=>1)
-    V = graded_space(:U1, 0=>2, 2=>1, -2=>1)
+    # A uniform bond space must carry BOTH parities to connect to itself
+    # through the ±1 physical charges. The previous pure-even choice
+    # (0=>2, 2=>1, -2=>1) had a zero-dimensional site hom-space and silently
+    # produced the zero state; such spaces are now rejected (tested in
+    # test_symmetric_construction.jl).
+    V = graded_space(:U1, 0=>2, 1=>1, -1=>1)
     ψ = rand_iMPS(P, V, 2)
     @test ψ.Γ[1] isa AbstractTensorMap
     @test ψ.λ[1] isa DiagonalTensorMap
     @test ψ.n == 2
     @test length(ψ.Γ) == 2 && length(ψ.λ) == 2
+    # The state is actually nonzero (a zero-dim hom-space would have thrown).
+    @test all(norm(ψ.Γ[i]) > 0 for i in 1:2)
     # Domain/codomain check: each Γ[i] should map V ⊗ P → V (rank-3 in MPS shape).
     for i in 1:2
         @test codomain(ψ.Γ[i])[1] == V
@@ -244,28 +255,34 @@ end
     # state with NaN or Inf in a Schmidt block would construct silently and
     # then quietly poison every downstream contraction. Mirror the dense path's
     # finite / non-negative / non-zero-norm check on each block's diagonal.
+    #
+    # The bond spaces alternate parity (Néel-style cumulative charges 0 and 1)
+    # so the site hom-spaces are nonzero — the inner constructor now rejects
+    # charge-frustrated (structurally zero) site spaces with its own
+    # ArgumentError, which would shadow the λ checks under test here.
     P  = graded_space(:U1, 1=>1, -1=>1)
-    Va = graded_space(:U1, 0=>1)
-    Γ  = [zeros(ComplexF64, Va ⊗ P ← Va) for _ in 1:2]
+    Va = graded_space(:U1, 0=>1)          # wraparound bond (left of site 1)
+    Vb = graded_space(:U1, 1=>1)          # bond between sites 1 and 2
+    Γ  = [zeros(ComplexF64, Va ⊗ P ← Vb), zeros(ComplexF64, Vb ⊗ P ← Va)]
 
     # NaN value
-    λ_nan = [DiagonalTensorMap([NaN], Va), DiagonalTensorMap([1.0], Va)]
+    λ_nan = [DiagonalTensorMap([NaN], Vb), DiagonalTensorMap([1.0], Va)]
     @test_throws ArgumentError iMPS(Γ, λ_nan, 2)
 
     # +Inf value
-    λ_inf = [DiagonalTensorMap([Inf], Va), DiagonalTensorMap([1.0], Va)]
+    λ_inf = [DiagonalTensorMap([Inf], Vb), DiagonalTensorMap([1.0], Va)]
     @test_throws ArgumentError iMPS(Γ, λ_inf, 2)
 
     # Negative value (Schmidt singular values must be ≥ 0)
-    λ_neg = [DiagonalTensorMap([-1.0], Va), DiagonalTensorMap([1.0], Va)]
+    λ_neg = [DiagonalTensorMap([-1.0], Vb), DiagonalTensorMap([1.0], Va)]
     @test_throws ArgumentError iMPS(Γ, λ_neg, 2)
 
     # All-zero bond (degenerate, would produce 0/0 in pseudo-inverse)
-    λ_zero = [DiagonalTensorMap([0.0], Va), DiagonalTensorMap([1.0], Va)]
+    λ_zero = [DiagonalTensorMap([0.0], Vb), DiagonalTensorMap([1.0], Va)]
     @test_throws ArgumentError iMPS(Γ, λ_zero, 2)
 
     # Sanity: a valid bond still constructs.
-    λ_ok = [DiagonalTensorMap([1.0], Va), DiagonalTensorMap([1.0], Va)]
+    λ_ok = [DiagonalTensorMap([1.0], Vb), DiagonalTensorMap([1.0], Va)]
     @test iMPS(Γ, λ_ok, 2) isa iMPS
 end
 
@@ -397,8 +414,13 @@ end
     using Random
     Random.seed!(2)
     P = graded_space(:U1, 1=>1, -1=>1)
-    V = graded_space(:U1, 0=>2, 2=>1, -2=>1)
+    # Mixed-parity bond space: the previous pure-even (0=>2, 2=>1, -2=>1)
+    # choice was charge-frustrated against the ±1 physical charges (zero-dim
+    # hom-space → identically-zero state) and is now rejected at construction.
+    # This (V, seed=2) pair matches the known-injective canonical! testset.
+    V = graded_space(:U1, 0=>1, 1=>1, -1=>1, 2=>1, -2=>1)
     ψ = rand_iMPS(P, V, 2)
+    @test all(norm(ψ.Γ[i]) > 0 for i in 1:2)
     canonical!(ψ)
 
     norm_before = schmidt_values(ψ, 1)
@@ -470,14 +492,33 @@ end
     using Random
     Random.seed!(2)
     P = graded_space(:U1, 1=>1, -1=>1)
-    V = graded_space(:U1, 0=>2, 2=>1, -2=>1)
+    # Regression (2026-06-09 review, P0): this testset used to build its state
+    # from the pure-even bond space (0=>2, 2=>1, -2=>1), which is
+    # charge-frustrated against the ±1 physical charges — every site
+    # hom-space had dimension zero, the state was identically zero, and the
+    # test passed vacuously because it asserted only `isa`. That construction
+    # must now throw the informative ArgumentError instead of producing a
+    # silent zero state.
+    V_dead = graded_space(:U1, 0=>2, 2=>1, -2=>1)
+    @test_throws ArgumentError rand_iMPS(P, V_dead, 2)
+
+    # The actual routing test, on a valid mixed-parity state (the
+    # known-injective (V, seed=2) pair from the canonical! testset).
+    V = graded_space(:U1, 0=>1, 1=>1, -1=>1, 2=>1, -2=>1)
     ψ = rand_iMPS(P, V, 2)
     canonical!(ψ)
+    @test all(norm(ψ.Γ[i]) > 0 for i in 1:2)
     Iop = id(ComplexF64, P ⊗ P)
     gates = [(Iop, 1, 2), (Iop, 2, 1)]
     evolve!(ψ, gates, 3; maxdim=8)
     @test ψ.Γ[1] isa AbstractTensorMap
     @test ψ.λ[1] isa DiagonalTensorMap
+    # The evolved state stays nonzero with a normalised Schmidt spectrum —
+    # the old zero state sailed through evolve! with all-zero tensors.
+    @test all(norm(ψ.Γ[i]) > 0 for i in 1:2)
+    for i in 1:ψ.n
+        @test isapprox(sum(abs2, schmidt_values(ψ, i)), 1.0; atol=1e-8)
+    end
 end
 
 @testset "evolve! end-to-end on a Z2 product state" begin
@@ -506,7 +547,9 @@ end
     # `λ::AbstractVector`. The extension's specialisation flattens the
     # per-sector diagonal and delegates to the dense routine.
     P = graded_space(:U1, 1=>1, -1=>1)
-    V = graded_space(:U1, 0=>2, 2=>1, -2=>1)
+    # Mixed-parity bond space (the previous pure-even choice was
+    # charge-frustrated and produced a zero state; it is rejected now).
+    V = graded_space(:U1, 0=>1, 1=>1, -1=>1, 2=>1, -2=>1)
     Random.seed!(42)
     ψ = rand_iMPS(P, V, 2)
     canonical!(ψ)
@@ -559,11 +602,14 @@ end
     using Random
     Random.seed!(2)
     P = graded_space(:U1, 1=>1, -1=>1)
-    V = graded_space(:U1, 0=>2, 2=>1, -2=>1)
+    # Mixed-parity bond space (the previous pure-even choice was
+    # charge-frustrated and produced a zero state with ent_S ≡ 0; it is
+    # rejected now). With a real random state the entropy is strictly positive.
+    V = graded_space(:U1, 0=>1, 1=>1, -1=>1, 2=>1, -2=>1)
     ψ = rand_iMPS(P, V, 2)
     canonical!(ψ)
     S = ent_S(ψ, 1)
-    @test S ≥ 0
+    @test S > 0
     @test isfinite(S)
 end
 
