@@ -1,6 +1,6 @@
 name = "InfiniteTEBD"
 uuid = "344ae493-4147-41e1-a539-381088f0e418"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["jayren3996"]
 
 [deps]
