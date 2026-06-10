@@ -49,7 +49,13 @@ function _transfer_degeneracy(Γ::AbstractArray{<:Number,3})
     Dl, _, Dr = size(Γ)
     Dl == Dr || return (degenerate=false, count=0, leading=0.0, tol=0.0)
 
-    if Dl * Dr > 2500
+    # The dense eigvals below acts on a (Dl·Dr)×(Dl·Dr) nonsymmetric matrix, so
+    # its cost is (Dl·Dr)³ — a hard cliff. The previous threshold of 2500 meant
+    # the default MAXDIM=50 state (Dl·Dr = 2500 exactly) paid ~6 s and ~300 MiB
+    # per schmidt_canonical call for a diagnostic. Keep the exact dense check
+    # only for genuinely small bonds (χ ≤ 20) and use the cheap structural
+    # heuristic above that size, matching what already happened for χ ≥ 51.
+    if Dl * Dr > 400
         sector = _simple_sector_selection(Γ)
         if !isnothing(sector)
             return (degenerate=true, count=sector.sectors, leading=NaN, tol=0.0)
@@ -127,7 +133,12 @@ Keyword arguments:
 - `cutoff=SVDTOL`
   Singular values smaller than this threshold are discarded.
 - `renormalize=true`
-  Whether to renormalize the retained Schmidt values.
+  Whether to renormalize the retained Schmidt values. With
+  `renormalize=false` the returned tensor keeps the state's original norm,
+  while the returned Schmidt spectrum is rescaled to the canonical unit-norm
+  convention (`Σλ² = 1` up to genuinely discarded truncation weight) — the
+  raw singular values would otherwise carry an arbitrary gauge factor from
+  the unit-Frobenius normalization of the transfer fixed points.
 - `zerotol=ZEROTOL`
   Threshold used when selecting positive eigenvalues of the transfer-matrix
   fixed points.
@@ -163,7 +174,15 @@ function schmidt_canonical(
     length(S_in) == size(Γ, 1) ||
         throw(ArgumentError("incoming Schmidt spectrum length must match the left bond dimension"))
 
-    degeneracy = _transfer_degeneracy(Γ)
+    # With noninjective=:ignore and symmetry_break=:none the degeneracy result
+    # is provably unused (no error, no warning, no sector selection), so skip
+    # the diagnostic entirely. This is the configuration canonical! uses for
+    # its second gauge-restoration pass.
+    degeneracy = if noninjective === :ignore && symmetry_break === :none
+        (degenerate=false, count=0, leading=0.0, tol=0.0)
+    else
+        _transfer_degeneracy(Γ)
+    end
     _handle_noninjective!(degeneracy, noninjective)
     if degeneracy.degenerate && symmetry_break == :auto
         sector = _simple_sector_selection(Γ)
@@ -220,11 +239,26 @@ function schmidt_canonical(
     X_inv = (vr .* inv_sqrt_er') * vr'
     Yt_inv = (vl .* inv_sqrt_el') * vl'
 
-    U, S_new, V = svd_trim(Yt * (S_in .* X); maxdim, svd_min=cutoff, renormalize)
+    M = Yt * (S_in .* X)
+    U, S_new, V = svd_trim(M; maxdim, svd_min=cutoff, renormalize)
     R_mat = Yt_inv * U
     L_mat = V * X_inv
     Γ_new = canonical_gauging(Γc, R_mat, L_mat)
     tensor_rmul!(Γ_new, S_new)
+    if !renormalize
+        # The raw singular values of M carry an arbitrary overall scale: the
+        # fixed points from steady_mat are unit-Frobenius-normalized, not
+        # normalized to the physical transfer eigenvalue, so S_new = c·λ with
+        # c = ‖M‖_F (the true Schmidt spectrum has unit 2-norm before
+        # truncation). The gauge factors cancel inside the stored tensor —
+        # Γ_new·diag(S_new) reconstructs the state at its original norm for
+        # any c — but the returned spectrum must be rescaled or the λ field
+        # convention (Σλ² = 1 up to genuinely discarded weight) breaks by 1/c.
+        c = norm(M)
+        if isfinite(c) && c > 0
+            S_new = S_new ./ c
+        end
+    end
     Γ_new, S_new
 end
 #---------------------------------------------------------------------------------------------------

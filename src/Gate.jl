@@ -17,6 +17,10 @@ Parameters:
 - `G`
   Dense local operator acting on the physical Hilbert space of the grouped
   block. Its matrix dimension must match the total physical dimension of `Γs`.
+  The operator must already be in the internal fused-leg layout (leftmost
+  site's index fastest); [`applygate!`](@ref) converts from the documented
+  `kron` convention before calling this routine, and direct callers can use
+  [`convert_operator`](@ref) to do the same.
 - `Γs`
   Stored local tensors for the contiguous block to be updated.
 - `λl`
@@ -139,6 +143,15 @@ Notes:
 - For multi-site updates, this routine works directly with the stored
   right-canonical tensors `ψ.Γ`.
 - Site indices are interpreted periodically through the finite unit cell.
+- Multi-site gates follow the documented `kron` convention: the leftmost site
+  of the support corresponds to the leftmost `kron` factor, so
+  `kron(A, B)` applied to `(i, i+1)` acts `A` on site `i` and `B` on site
+  `i+1`. The conversion to the internal fused-leg layout happens inside this
+  routine.
+- The gate's element type must be representable in the state's element type:
+  applying a complex gate to a real-eltype state throws an `ArgumentError`
+  (construct the state with `ComplexF64`, or convert it with
+  [`mps_promote_type`](@ref)).
 
 Example:
 ```julia
@@ -161,16 +174,26 @@ function applygate!(
 )
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_truncation_args(maxdim, mindim, truncerr, svd_floor)
+    _check_gate_eltype(ψ, G)
     i0, j0 = _normalize_gate_sites(ψ, i, j)
     if isequal(i0, j0)
         tensor_umul!(G, ψ.Γ[i0])
         if renormalize
             # Single-site gates can be non-unitary (e.g. imaginary-time terms
-            # like exp(-dτ * h_local)). The previous code accepted
-            # renormalize=true but silently ignored it here, so the per-cell
-            # norm drifted away from 1 after every non-unitary 1-site update.
-            scale = inner_product(ψ)
-            scale > 0 && (ψ.Γ[i0] ./= sqrt(scale))
+            # like exp(-dτ * h_local)), so renormalize must undo the norm
+            # change. A unitary gate cannot change the norm, and checking
+            # unitarity is O(d³) on the tiny physical dimension — so the hot
+            # real-time path skips the normalization entirely. The previous
+            # code ran a whole-unit-cell Krylov eigensolve (inner_product) on
+            # every renormalized single-site gate, costing ~20× the gate
+            # update itself for a mathematical no-op. Genuinely non-unitary
+            # gates keep the exact global norm computation: any local
+            # estimate goes stale as repeated non-unitary updates drive the
+            # state away from canonical form.
+            if norm(G' * G - I) > 1e-10 * size(G, 1)
+                scale = inner_product(ψ)
+                isfinite(scale) && scale > 0 && (ψ.Γ[i0] ./= sqrt(scale))
+            end
         end
         if return_stats
             return ψ, (
@@ -185,9 +208,14 @@ function applygate!(
     inds = _gate_indices(ψ, i0, j0)
     Γs = ψ.Γ[inds]
     λl = ψ.λ[mod(i0-2,ψ.n)+1]
+    # User-facing gates follow the documented kron convention (leftmost kron
+    # factor acts on the leftmost site of the support); the internal fused
+    # physical leg puts the leftmost site's index fastest, which is the mirror
+    # ordering. Reverse the site order once at this boundary.
+    G_int = _operator_to_internal(G, Int[size(Γk, 2) for Γk in Γs])
     if return_stats
         Γs, λs, bond_stats = tensor_applygate!(
-            G,
+            G_int,
             Γs,
             λl;
             maxdim,
@@ -200,7 +228,7 @@ function applygate!(
         )
     else
         Γs, λs = tensor_applygate!(
-            G,
+            G_int,
             Γs,
             λl;
             maxdim,
@@ -250,6 +278,23 @@ end
 
 function _normalize_gate_sites(ψ::iMPS, i::Integer, j::Integer)
     return _normalize_gate_site(ψ, i), _normalize_gate_site(ψ, j)
+end
+
+# The iMPS tensor storage is concretely typed, so an in-place update cannot
+# promote a real state to complex; without this guard a complex gate on a real
+# state fails deep inside the update with an InexactError (single-site path)
+# or at the tensor write-back (multi-site path) — possibly after mutating part
+# of the state. Real gates on complex states promote fine and are allowed.
+function _check_gate_eltype(ψ::iMPS, G::AbstractMatrix)
+    if eltype(ψ) <: Real && eltype(G) <: Complex
+        throw(ArgumentError(
+            "cannot apply a gate with complex element type $(eltype(G)) in place to an " *
+            "iMPS with real element type $(eltype(ψ)). Construct the state with a " *
+            "complex element type (e.g. rand_iMPS(ComplexF64, n, d, dim) or " *
+            "product_iMPS(ComplexF64, vectors)), or convert an existing state with " *
+            "mps_promote_type(ComplexF64, ψ)."))
+    end
+    return nothing
 end
 
 function _updated_bond_indices(ψ::iMPS, i::Integer, j::Integer)
@@ -394,7 +439,16 @@ function _append_strang_step!(
     scale::Real
 )
     if num_layers == 1
-        return _push_trotter_stage!(stages, 1, scale)
+        # A single-layer schedule has no half-step boundaries, so the generic
+        # push-with-merge would fuse *every* macro step into one ever-growing
+        # stage: evolve!(ψ, layers, dt, steps) would build exp(-i·steps·dt·h)
+        # and apply it once, skipping every intermediate truncation. That is
+        # exact only when all terms in the layer commute; outside that
+        # contract it silently changes the physics. Push each macro step as
+        # its own stage instead so the evolution stays step-by-step.
+        abs(scale) <= ZEROTOL && return stages
+        push!(stages, (1, Float64(scale)))
+        return stages
     end
 
     for layer in 1:num_layers-1
@@ -793,6 +847,10 @@ function evolve!(
 
     stages = _trotter_stage_schedule(length(layers), trotter, steps)
     gates = _materialize_trotter_gates(layers, dt, stages; evolution)
+    # Fail before touching ψ: real-time gates are complex, so a default
+    # Float64 state would otherwise error mid-sweep with part of the unit
+    # cell already updated.
+    isempty(gates) || _check_gate_eltype(ψ, gates[1][1])
 
     updates = _evolve_gate_sequence!(
         ψ,
@@ -815,30 +873,61 @@ end
 # Multi-Site Operators
 #---------------------------------------------------------------------------------------------------
 """
+    _operator_to_internal(mat, dims)
+
+Map a multi-site operator from the documented user convention — `kron(A, B)`
+acts `A` on the leftmost site of the support — to the internal fused-leg
+layout used by [`tensor_applygate!`](@ref) and `ocontract`, where the leftmost
+site's physical index is the *fastest* index of the fused leg. Julia's `kron`
+makes the rightmost factor's index fastest, so the two conventions are mirror
+images of each other: the map reverses the site order of the operator.
+
+`dims` lists the per-site physical dimensions of the support from left to
+right. The map is an involution when the dimensions are uniform.
+
+User-facing routines (`applygate!`, `expect`, and everything built on them)
+perform this conversion internally; only callers of the low-level fused-leg
+helpers need it explicitly.
+"""
+function _operator_to_internal(mat::AbstractMatrix, dims::AbstractVector{<:Integer})
+    n = length(dims)
+    n <= 1 && return mat
+    D = prod(dims)
+    size(mat) == (D, D) || throw(DimensionMismatch(
+        "operator has size $(size(mat)); expected ($D, $D) for site dimensions $dims"))
+    rd = reverse(collect(Int, dims))
+    tensor = reshape(mat, (rd..., rd...))
+    tensor = permutedims(tensor, [n:-1:1; 2n:-1:n+1])
+    return reshape(tensor, D, D)
+end
+
+"""
     convert_operator(mat, d, n)
 
-Convert a `d^n × d^n` local operator into the column-major tensor convention
-used internally by this package.
+Reverse the site ordering of a `d^n × d^n` local operator, converting between
+the documented `kron` convention (leftmost site ↔ leftmost factor) and the
+package's internal fused-leg layout (leftmost site's index fastest).
 
 Parameters:
 - `mat`
-  Dense operator written in the conventional site ordering.
+  Dense operator acting on `n` sites of local dimension `d`.
 - `d`
   Local Hilbert-space dimension per site.
 - `n`
   Number of sites acted on by the operator.
 
 Returns:
-- A dense matrix with the same shape as `mat`, but reordered to match the
-  package's column-major tensor convention.
+- A dense matrix with the same shape as `mat` and the site order reversed:
+  for example `convert_operator(kron(A, B), d, 2) == kron(B, A)`.
 
 Notes:
-- This is useful when importing local operators written in a different index
-  ordering.
+- The map is an involution: applying it twice returns the original operator.
+- User-facing routines such as [`applygate!`](@ref) and `expect` accept
+  operators in the documented `kron` convention and perform this conversion
+  internally, so most users never need to call it. It remains useful when
+  driving the low-level fused-leg helpers (`tensor_applygate!`, `ocontract`)
+  directly.
 """
 function convert_operator(mat::AbstractMatrix, d::Integer, n::Integer)
-    tensor = reshape(mat, fill(d, 2n)...)
-    perm = [n:-1:1; 2n:-1:n+1]
-    tensor = permutedims(tensor, perm)
-    reshape(tensor, size(mat))
+    return _operator_to_internal(mat, fill(Int(d), n))
 end

@@ -296,7 +296,11 @@ function _iterative_svd_trim(
     # tol=svd_min would give singular-value precision of only sqrt(svd_min).
     # Clamp below at machine precision to avoid asking for sub-eps residuals.
     eig_tol = max(svd_min^2, eps(real(SType)))
-    vals, vecs, info = eigsolve(f, v0, k, :LM; ishermitian=true, tol=eig_tol)
+    # KrylovKit errors when howmany exceeds krylovdim (default 30), so any
+    # maxdim > 30 needs an explicit subspace size. k ≤ length(v0) always, so
+    # the clamp keeps krylovdim ≥ k while never exceeding the problem size.
+    kdim = min(max(30, k + 5), length(v0))
+    vals, vecs, info = eigsolve(f, v0, k, :LM; ishermitian=true, tol=eig_tol, krylovdim=kdim)
     if info.converged < min(k, length(vals))
         @warn "Iterative SVD eigsolve did not fully converge" info=info wanted=k
     end
