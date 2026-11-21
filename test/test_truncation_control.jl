@@ -21,6 +21,15 @@ const BELL_GATE = CNOT_GATE * kron(H_GATE, I(2))
     @test choice.discarded_weight <= 0.06
     @test sum(choice.weights[choice.chi_keep + 1:end]) <= 0.06
     @test sum(choice.weights[choice.chi_keep:end]) > 0.06
+
+    for magnitude in (1e-250, 1.0, 1e250)
+        s = magnitude .* [1.0, 1e-10]
+        tight = InfiniteTEBD._discarded_weight_choice(s; maxdim=1, truncerr=1e-22)
+        @test tight.chi_req == 2 && !tight.target_met
+        @test tight.discarded_weight ≈ 1e-20
+        loose = InfiniteTEBD._discarded_weight_choice(s; truncerr=2e-20)
+        @test loose.chi_req == 1 && loose.target_met
+    end
 end
 
 @testset "APPLYGATE_TRUNCERR_IS_ENFORCED_WHEN_NOT_SATURATED" begin

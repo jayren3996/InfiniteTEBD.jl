@@ -124,6 +124,12 @@ function tensor_umul(umat::AbstractMatrix, Γ::AbstractArray{<:Number, 3})
     Γ_new
 end
 
+function tensor_umul(umat::Diagonal, Γ::AbstractArray{<:Number,3})
+    size(umat, 1) == size(Γ, 2) || throw(DimensionMismatch(
+        "diagonal operator has size $(size(umat)); tensor has physical dim $(size(Γ, 2))"))
+    return Γ .* reshape(umat.diag, 1, :, 1)
+end
+
 """
     tensor_umul!(umat, Γ)
 
@@ -473,15 +479,7 @@ function _discarded_weight_choice(
     maxdim_i = Int(maxdim)
     truncerr_f = Float64(truncerr)
     svd_min_f = Float64(svd_min)
-    # Absorb only floating-point roundoff in the cumulative-sum comparison, not
-    # a generous "discard small modes" budget. The previous `sqrt(eps)` slack
-    # silently dropped physical modes whose cumulative weight was below ~1.5e-8,
-    # which then broke the right-canonical condition on the leftmost SVD output
-    # once the gate-block left Schmidt λl was divided out. With strict-eps slack
-    # and `truncerr=0`, only modes below `svd_min` are dropped — preserving
-    # canonical form across unitary gates exactly as the textbook iTEBD
-    # algorithm guarantees.
-    target_slack = eps(Float64)
+    target = truncerr_f * (1 + eps(Float64))
 
     n = length(s)
     n == 0 && return (
@@ -495,11 +493,9 @@ function _discarded_weight_choice(
         largest_discarded_sv=0.0,
     )
 
-    total_weight = 0.0
-    for si in s
-        total_weight += Float64(abs2(si))
-    end
-    total_weight > 0 || return (
+    scale = Float64(maximum(abs, s))
+    isfinite(scale) || throw(ArgumentError("singular values must be finite"))
+    scale > 0 || return (
         chi_req=1,
         chi_keep=1,
         weights=zeros(Float64, n),
@@ -513,24 +509,26 @@ function _discarded_weight_choice(
     probs = Vector{Float64}(undef, n)
     chi_by_floor = 0
     use_floor = svd_min_f > 0
-
-    chi_req = n
-    cumulative = 0.0
-    for χ in 1:n
-        @inbounds si = s[χ]
-        @inbounds probs[χ] = Float64(abs2(si)) / total_weight
-        if use_floor && abs(si) >= svd_min_f
+    total_weight = 0.0
+    @inbounds for i in 1:n
+        value = abs(s[i])
+        probs[i] = abs2(Float64(value) / scale)
+        total_weight += probs[i]
+        if use_floor && value >= svd_min_f
             chi_by_floor += 1
         end
     end
+    probs ./= total_weight
 
-    for χ in 1:n
-        @inbounds cumulative += probs[χ]
-        discarded_weight = χ < n ? 1.0 - cumulative : 0.0
-        if discarded_weight <= truncerr_f + target_slack
-            chi_req = χ
-            break
-        end
+    # Sum from the smallest values so a tiny physical tail is still visible
+    # when the kept weight rounds to one.
+    chi_req = n
+    tail = 0.0
+    @inbounds for i in n:-1:2
+        candidate = tail + probs[i]
+        candidate <= target || break
+        tail = candidate
+        chi_req = i - 1
     end
 
     chi_keep = min(n, clamp(chi_req, mindim_i, maxdim_i))
@@ -538,21 +536,26 @@ function _discarded_weight_choice(
         chi_keep = min(chi_keep, max(chi_by_floor, min(mindim_i, n)))
     end
 
-    kept_weight = 0.0
-    @inbounds for i in 1:chi_keep
-        kept_weight += probs[i]
+    discarded_weight = 0.0
+    @inbounds for i in n:-1:chi_keep+1
+        discarded_weight += probs[i]
     end
-    discarded_weight = chi_keep < n ? 1.0 - kept_weight : 0.0
     (
         chi_req=chi_req,
         chi_keep=chi_keep,
         weights=probs,
         discarded_weight=discarded_weight,
         saturated=chi_req > maxdim_i,
-        target_met=discarded_weight <= truncerr_f + target_slack,
+        target_met=discarded_weight <= target,
         smallest_kept_sv=Float64(abs(s[chi_keep])),
         largest_discarded_sv=chi_keep < n ? Float64(abs(s[chi_keep + 1])) : 0.0,
     )
+end
+
+function _svd_rank_choice(mat; maxdim, mindim, truncerr, svd_min)
+    _finite_entries(mat, "SVD input matrix")
+    result = _svd_with_fallback(mat)
+    return result, _discarded_weight_choice(result.S; mindim, maxdim, truncerr, svd_min)
 end
 
 function _svd_truncate_by_error(
@@ -563,15 +566,7 @@ function _svd_truncate_by_error(
     svd_min::Real=0.0,
     renormalize::Bool=false
 )
-    _finite_entries(mat, "SVD input matrix")
-    res = _svd_with_fallback(mat)
-    choice = _discarded_weight_choice(
-        res.S;
-        mindim,
-        maxdim,
-        truncerr,
-        svd_min,
-    )
+    res, choice = _svd_rank_choice(mat; maxdim, mindim, truncerr, svd_min)
     len = choice.chi_keep
     U = res.U[:, 1:len]
     S = res.S[1:len]
@@ -853,11 +848,13 @@ end
 #---------------------------------------------------------------------------------------------------
 # Matrix-free transfer-map application
 #---------------------------------------------------------------------------------------------------
+export apply_transfer, apply_chain_transfer
+
 """
     apply_transfer(T1, T2, ρ; dir=:r)
 
 Apply the single-site mixed transfer map E(T1, T2) to a matrix `ρ` without
-materializing the χ²×χ² dense transfer matrix produced by [`gtrm`](@ref).
+materializing the dense transfer matrix `M` produced by `gtrm(T1, T2)`.
 
 With `T1` of shape `(χL1, d, χR1)` and `T2` of shape `(χL2, d, χR2)`:
 
@@ -866,7 +863,9 @@ With `T1` of shape `(χL1, d, χR1)` and `T2` of shape `(χL2, d, χR2)`:
   `ρ'[a, b] = ∑_{a',b',s} T2[a, s, a'] * ρ[a', b'] * conj(T1[b, s, b'])`
 
 * `dir=:l` takes `ρ` of shape `(χL2, χL1)` to a matrix of shape `(χR2, χR1)`
-  via the corresponding adjoint sweep.
+  via the left sweep, with `vec(result) = transpose(M) * vec(ρ)`. This
+  preserves the bilinear pairing with the right sweep, including for complex
+  mixed transfers.
 
 Each call costs `O(d·χ³)` and is the matrix-free building block underlying the
 fast `inner_product` Krylov path.
@@ -900,10 +899,9 @@ function apply_transfer(
         T2_mat = reshape(T2, χL2, d * χR2)
         tmp = transpose(ρ) * T2_mat                           # (χL1, d·χR2)
         tmp = reshape(tmp, χL1 * d, χR2)
-        # Step 2: ρ'[χR2, χR1] = adjoint(conj(T1))[χR1, χL1·d] * tmp[χL1·d, χR2]
-        #   ⇔ ρ'[χR2, χR1] = transpose(tmp)[χR2, χL1·d] * (T1_mat_conj_flat)[χL1·d, χR1]
+        # Conjugate the smaller output of tmp' * T1 rather than a site tensor.
         T1_mat = reshape(T1, χL1 * d, χR1)
-        return transpose(tmp) * conj(T1_mat)
+        return conj!(adjoint(tmp) * T1_mat)
     else
         throw(ArgumentError("Illegal direction: $dir."))
     end
@@ -911,15 +909,26 @@ end
 
 """
     apply_chain_transfer(T1s, T2s, ρ; dir=:r)
+    apply_chain_transfer(ψ1, ψ2, ρ; dir=:r)
+    apply_chain_transfer(ψ, ρ; dir=:r)
 
 Apply the n-site unit-cell mixed transfer
 `E_cell = E_1 · E_2 · … · E_n` to a matrix `ρ` via a site-by-site sweep,
 without materializing any χ²×χ² intermediate.
 
+`T1s` supplies the conjugated tensors and `T2s` supplies the unconjugated
+tensors. The tensor lists must have equal nonzero length and matching
+physical dimensions at every site. The dense iMPS methods use the stored
+unit-cell tensors, with `apply_chain_transfer(ψ, ρ)` giving the self transfer.
+For these periodic states, the input and result of either sweep have shape
+`(χ₂, χ₁)`, where `χᵢ` is the wraparound bond dimension of `ψᵢ`.
+
 Cost is `O(n·d·χ³)` per call versus `O(n·χ⁶)` for the dense product, with
 identical numerical result up to roundoff. For `dir=:r` the sweep applies
 `E_n` first, then `E_{n-1}`, …, then `E_1`, matching the matrix-product
-ordering returned by [`gtrm`](@ref).
+ordering returned by `gtrm`. `dir=:l` sweeps from the first site to the last
+and applies the transpose of that dense matrix in vectorized form. Both
+sweeps leave `ρ` and the tensors intact and return a new matrix.
 """
 function apply_chain_transfer(
     T1s::AbstractVector{<:AbstractArray{<:Number, 3}},
@@ -949,23 +958,22 @@ end
 
 # Workspace used by the in-place transfer-chain sweep. Buffers are sized to the
 # maximum intermediate needed across all sites, so a single workspace suffices
-# even when bond dimensions vary inside the unit cell. dir=:r only (the
-# matrix-free inner-product / dominant-eigenvalue path); dir=:l falls back to
-# the allocating `apply_chain_transfer`.
+# even when bond dimensions vary inside the unit cell.
 struct ChainTransferWorkspace{T<:Number}
-    tmp::Vector{T}        # holds the (χL2·d, χR1) per-site intermediate
+    tmp::Vector{T}
     buf_a::Vector{T}      # ping-pong buffers for the running ρ
     buf_b::Vector{T}
 end
 
 function ChainTransferWorkspace(T::Type, T1s, T2s)
     n = length(T1s)
+    n == length(T2s) > 0 || throw(ArgumentError("expected equally long nonempty tensor lists"))
     tmp_cap = 0
     rho_cap = 0
     for i in 1:n
         χL1, d, χR1 = size(T1s[i])
         χL2, _, χR2 = size(T2s[i])
-        tmp_cap = max(tmp_cap, χL2 * d * χR1)
+        tmp_cap = max(tmp_cap, χL2 * d * χR1, χL1 * d * χR2)
         rho_cap = max(rho_cap, χR2 * χR1, χL2 * χL1)
     end
     ChainTransferWorkspace{T}(
@@ -988,9 +996,8 @@ stored in `ws::ChainTransferWorkspace`. Returns a reshape view into one of the
 workspace's ping-pong buffers; the returned matrix aliases workspace memory and
 is invalidated on the next call.
 
-Only `dir=:r` is supported in-place; this is the path used by the matrix-free
-Krylov inner-product loop. Allocations are O(1) per call (just reshape views),
-independent of the unit cell length.
+The two directions have the same convention as `apply_chain_transfer`.
+Both reuse the matrix multiplication buffers over all sites.
 """
 function apply_chain_transfer!(
     ws::ChainTransferWorkspace{T},
@@ -999,41 +1006,55 @@ function apply_chain_transfer!(
     ρ::AbstractMatrix;
     dir::Symbol=:r,
 ) where {T}
-    dir === :r || throw(ArgumentError(
-        "apply_chain_transfer! only supports dir=:r; use apply_chain_transfer for dir=:l"
-    ))
+    dir in (:r, :l) || throw(ArgumentError("Illegal direction: $dir."))
     n = length(T1s)
     n == length(T2s) || throw(ArgumentError(
         "T1s and T2s have different lengths: $n vs $(length(T2s))"
     ))
     n > 0 || throw(ArgumentError("T1s and T2s must be non-empty"))
 
-    χ_in1, χ_in2 = size(ρ)
-    copyto!(view(ws.buf_a, 1:(χ_in1 * χ_in2)), vec(ρ))
+    cur_rows, cur_cols = size(ρ)
+    copyto!(view(ws.buf_a, 1:length(ρ)), vec(ρ))
     in_buf = ws.buf_a
     out_buf = ws.buf_b
-    cur_rows, cur_cols = χ_in1, χ_in2
 
-    @inbounds for i in n:-1:1
+    sites = dir === :r ? (n:-1:1) : (1:1:n)
+    for i in sites
         χL1, d, χR1 = size(T1s[i])
         χL2, d2, χR2 = size(T2s[i])
         d == d2 || throw(DimensionMismatch(
             "physical dimensions of T1[$i] ($d) and T2[$i] ($d2) must match"
         ))
-        cur_rows == χR2 && cur_cols == χR1 || throw(DimensionMismatch(
-            "ρ shape mismatch at site $i: have ($cur_rows, $cur_cols), expected ($χR2, $χR1)"
+        expected = dir === :r ? (χR2, χR1) : (χL2, χL1)
+        (cur_rows, cur_cols) == expected || throw(DimensionMismatch(
+            "ρ shape mismatch at site $i: have ($cur_rows, $cur_cols), expected $expected"
         ))
-        ρ_view = reshape(view(in_buf, 1:(χR2 * χR1)), χR2, χR1)
-        T2_mat = reshape(T2s[i], χL2 * d, χR2)
-        T1_mat = reshape(T1s[i], χL1, d * χR1)
-        tmp_view = reshape(view(ws.tmp, 1:(χL2 * d * χR1)), χL2 * d, χR1)
-        mul!(tmp_view, T2_mat, ρ_view)
-        out_view = reshape(view(out_buf, 1:(χL2 * χL1)), χL2, χL1)
-        mul!(out_view, reshape(tmp_view, χL2, d * χR1), adjoint(T1_mat))
-        cur_rows, cur_cols = χL2, χL1
+        ρ_view = reshape(view(in_buf, 1:(cur_rows * cur_cols)), cur_rows, cur_cols)
+        if dir === :r
+            tmp = reshape(view(ws.tmp, 1:(χL2 * d * χR1)), χL2 * d, χR1)
+            out = reshape(view(out_buf, 1:(χL2 * χL1)), χL2, χL1)
+            mul!(tmp, reshape(T2s[i], χL2 * d, χR2), ρ_view)
+            mul!(out, reshape(tmp, χL2, d * χR1), adjoint(reshape(T1s[i], χL1, d * χR1)))
+            cur_rows, cur_cols = χL2, χL1
+        else
+            tmp = reshape(view(ws.tmp, 1:(χL1 * d * χR2)), χL1, d * χR2)
+            out = reshape(view(out_buf, 1:(χR2 * χR1)), χR2, χR1)
+            mul!(tmp, transpose(ρ_view), reshape(T2s[i], χL2, d * χR2))
+            # conj(tmp' * flat(T1)) implements the transpose transfer
+            # without allocating a conjugated copy of the site tensor.
+            mul!(out, adjoint(reshape(tmp, χL1 * d, χR2)), reshape(T1s[i], χL1 * d, χR1))
+            conj!(out)
+            cur_rows, cur_cols = χR2, χR1
+        end
         in_buf, out_buf = out_buf, in_buf
     end
     return reshape(view(in_buf, 1:(cur_rows * cur_cols)), cur_rows, cur_cols)
+end
+
+function _chain_transfer_action(T1s, T2s; dir)
+    workspace = ChainTransferWorkspace(T1s, T2s)
+    # Krylov retains its iterates, so every call must return an owning array.
+    return ρ -> copy(apply_chain_transfer!(workspace, T1s, T2s, ρ; dir))
 end
 
 #---------------------------------------------------------------------------------------------------

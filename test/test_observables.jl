@@ -36,6 +36,28 @@ end
     @test InfiniteTEBD.inner_product(ψ.Γ) ≈ InfiniteTEBD.inner_product(ψ.Γ, ψ.Γ) atol=1e-12
 end
 
+@testset "PUBLIC_IMPS_TRANSFER_ACTION" begin
+    ψ1 = iMPS([deterministic_tensor(3, 2, 2), deterministic_tensor(2, 2, 3)],
+              [ones(2), ones(3)], 2)
+    ψ2 = iMPS([conj(deterministic_tensor(2, 2, 4)), deterministic_tensor(4, 2, 2)],
+              [ones(4), ones(2)], 2)
+    ρ = ComplexF64[1 2im 3; 4im 5 6im]
+    initial = copy(ρ)
+    M = InfiniteTEBD.gtrm(ψ1, ψ2)
+    @test apply_chain_transfer(ψ1, ψ2, ρ) ≈ reshape(M * vec(ρ), 2, 3)
+    @test apply_chain_transfer(ψ1, ψ2, ρ; dir=:l) ≈ reshape(transpose(M) * vec(ρ), 2, 3)
+    @test ρ == initial
+
+    Icell = Matrix{ComplexF64}(I, 3, 3)
+    Mself = InfiniteTEBD.gtrm(ψ1, ψ1)
+    @test apply_chain_transfer(ψ1, Icell) ≈ reshape(Mself * vec(Icell), 3, 3)
+    @test apply_chain_transfer(ψ1, Icell; dir=:l) ≈ reshape(transpose(Mself) * vec(Icell), 3, 3)
+
+    single = product_iMPS(ComplexF64, [[1, 0]])
+    @test_throws ArgumentError apply_chain_transfer(ψ1, single, ρ)
+    @test_throws DimensionMismatch apply_chain_transfer(ψ1, ψ2, transpose(ρ))
+end
+
 @testset "INNER_PRODUCT_MATRIX_FREE_MATCHES_DENSE_PATH" begin
     using Random
     Random.seed!(20260520)

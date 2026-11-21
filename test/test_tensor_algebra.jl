@@ -158,12 +158,12 @@ end
 
         ρ_r = randn(ComplexF64, χ2, χ1)
         ref_r = reshape(M * vec(ρ_r), χ2, χ1)
-        new_r = InfiniteTEBD.apply_transfer(T1, T2, ρ_r; dir=:r)
+        new_r = apply_transfer(T1, T2, ρ_r; dir=:r)
         @test new_r ≈ ref_r rtol=1e-10
 
         ρ_l = randn(ComplexF64, χ2, χ1)
         ref_l = reshape(transpose(M) * vec(ρ_l), χ2, χ1)
-        new_l = InfiniteTEBD.apply_transfer(T1, T2, ρ_l; dir=:l)
+        new_l = apply_transfer(T1, T2, ρ_l; dir=:l)
         @test new_l ≈ ref_l rtol=1e-10
     end
 end
@@ -202,6 +202,21 @@ end
     @test_throws ArgumentError InfiniteTEBD.apply_chain_transfer(T, T[1:2], zeros(ComplexF64, 4, 4))
     @test_throws ArgumentError InfiniteTEBD.apply_chain_transfer(typeof(T)(), typeof(T)(), zeros(ComplexF64, 4, 4))
     @test_throws ArgumentError InfiniteTEBD.apply_chain_transfer(T, T, zeros(ComplexF64, 4, 4); dir=:bad)
+end
+
+@testset "BUFFERED_LEFT_TRANSFER_AND_OWNED_ITERATES" begin
+    using Random
+    rng = MersenneTwister(784)
+    A = [randn(rng, ComplexF64, 3, 2, 5), randn(rng, ComplexF64, 5, 3, 3)]
+    B = [randn(rng, ComplexF64, 2, 2, 4), randn(rng, ComplexF64, 4, 3, 2)]
+    ρ = randn(rng, ComplexF64, 2, 3)
+    reference = reshape(transpose(InfiniteTEBD.gtrm(A, B)) * vec(ρ), size(ρ))
+    ws = InfiniteTEBD.ChainTransferWorkspace(A, B)
+    @test InfiniteTEBD.apply_chain_transfer!(ws, A, B, ρ; dir=:l) ≈ reference
+    action = InfiniteTEBD._chain_transfer_action(A, B; dir=:l)
+    first_result = action(ρ)
+    @test action(2ρ) ≈ 2reference
+    @test first_result ≈ reference
 end
 
 @testset "APPLY_TRANSFER_RECTANGULAR_BONDS_AND_FLOAT64" begin

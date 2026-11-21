@@ -239,20 +239,8 @@ function _dominant_chain_eigenvalue(
         seed[i, i] = one(T)
     end
 
-    # Reuse a single workspace across all Krylov matvecs. Without this the
-    # chain sweep allocates ~n * χ² per matvec, which dominates wall time for
-    # large unit cells (e.g. n=8 χ=32 → ~800 KB / matvec).
-    ws = ChainTransferWorkspace(T1s, T2s)
-    out_size = χR_T2 * χR_T1
-    f = function (ρ_vec)
-        ρ_mat = reshape(ρ_vec, χR_T2, χR_T1)
-        result_view = apply_chain_transfer!(ws, T1s, T2s, ρ_mat; dir=:r)
-        # Copy out of workspace into a fresh vector — eigsolve retains its
-        # iterates, so they cannot alias the ping-pong buffers.
-        out = Vector{T}(undef, out_size)
-        copyto!(out, vec(result_view))
-        return out
-    end
+    apply_cell = _chain_transfer_action(T1s, T2s; dir=:r)
+    f = ρ -> vec(apply_cell(reshape(ρ, χR_T2, χR_T1)))
 
     opts = _krylov_opts(; tol, maxiter)
     vals, _, info = eigsolve(f, vec(seed), 1, :LM; ishermitian=false, opts...)

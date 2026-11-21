@@ -276,8 +276,7 @@ function product_iMPS(
         isfinite(nrm) && nrm > 0 || throw(ArgumentError("local state vectors must be nonzero"))
         Γ[i][1,:,1] .= vec ./ nrm
     end
-    ψ = iMPS(Γ, λ, n)
-    canonical!(ψ)
+    return iMPS(Γ, λ, n)
 end
 #---------------------------------------------------------------------------------------------------
 function product_iMPS(v::AbstractVector{<:AbstractVector{<:Number}})
@@ -286,6 +285,18 @@ function product_iMPS(v::AbstractVector{<:AbstractVector{<:Number}})
 end
 #---------------------------------------------------------------------------------------------------
 export canonical!
+
+# Allow for the size of every fused prefix, including the final block.
+# A large interior virtual bond can make a prefix larger than the full cell.
+function _fits_grouped_cell(ψ::iMPS)
+    prefix_bytes = float(sizeof(eltype(ψ))) * size(first(ψ.Γ), 1)
+    for A in ψ.Γ
+        prefix_bytes *= size(A, 2)
+        prefix_bytes * size(A, 3) <= 2.0^20 || return false
+    end
+    return true
+end
+
 function _validate_canonical_options(maxdim, cutoff, noninjective::Symbol, symmetry_break::Symbol)
     maxdim isa Integer || throw(ArgumentError("maxdim must be an integer"))
     maxdim > 0 || throw(ArgumentError("maxdim must be positive"))
@@ -334,10 +345,10 @@ Keyword arguments:
   Singular values smaller than this threshold are discarded during
   canonicalization.
 - `renormalize=true`
-  If `true`, renormalize the retained Schmidt values after truncation. With
-  `renormalize=false` the stored tensors keep the state's original norm, while
-  the Schmidt spectra `ψ.λ` are still stored in the canonical unit-norm
-  convention (`Σλ² = 1` up to genuinely discarded truncation weight).
+  If `true`, renormalize the retained Schmidt values after truncation.
+  For a multi-site cell, `renormalize=false` keeps the scale of the retained
+  state. With no truncation this is the original norm per cell. The
+  one-site path includes a final normalization.
 - `noninjective=:warn`
   Policy for likely non-injective or degenerate transfer spectra. Supported
   values are `:warn`, `:error`, and `:ignore`.
@@ -354,6 +365,11 @@ Notes:
   `ψ.Γ[i] = B_i = Γ_i λ_i`.
 - If you canonicalize with a small `maxdim` or a large `cutoff`, the resulting
   state is the truncated state.
+- Dense cells with any fused prefix above 1 MiB, or whose physical
+  dimensions differ, use sitewise transfer contractions and a streaming
+  split with the same seam and left-to-right order of SVD cuts.
+  The streaming degeneracy diagnostic uses the transfer spectrum on
+  small virtual bonds and a diagonal-sector heuristic on larger bonds.
 - The bare Vidal tensors can be recovered afterwards with `ψ[i]`.
 
 Example:
@@ -374,44 +390,28 @@ function canonical!(
     maxiter::Union{Nothing,Integer}=nothing,
 )
     _validate_canonical_options(maxdim, cutoff, noninjective, symmetry_break)
-    bond_dims_before = length.(ψ.λ)
-    ψ.Γ[:], ψ.λ[:] = schmidt_canonical(
-        ψ.Γ,
-        ψ.λ[end];
-        maxdim,
-        cutoff,
-        renormalize,
-        noninjective,
-        symmetry_break,
-        tol,
-        maxiter,
-    )
-    # When truncation changes any bond dimension, the per-bond SVDs in
-    # tensor_decomp! leave the state only approximately right-canonical: the
-    # discarded singular modes break the matrix identity that the per-site
-    # U-factor rescaling relies on for its gauge. A second `schmidt_canonical`
-    # pass on the already-truncated state restores the exact gauge.
-    #
-    # A cheaper LQ-sweep gauge restoration was prototyped (see
-    # bench/bench_canonical_truncation.jl history) and found to produce a
-    # state with 1e-4 lower fidelity to the input than the full re-pass: the
-    # singular factor `S` left at the wrap bond after the LQ sweep cannot be
-    # absorbed back into either bordering site without breaking the
-    # per-site right-isometric condition, so dropping it changes the physical
-    # state. The full re-pass remains the correct algorithm.
-    if length.(ψ.λ) != bond_dims_before
-        ψ.Γ[:], ψ.λ[:] = schmidt_canonical(
-            ψ.Γ,
-            ψ.λ[end];
-            maxdim,
-            cutoff,
-            renormalize,
-            noninjective=noninjective == :error ? :error : :ignore,
-            symmetry_break=:none,
-            tol,
-            maxiter,
-        )
+    split = if ψ isa DenseIMPS &&
+               (!_fits_grouped_cell(ψ) || any(A -> size(A, 2) != size(ψ.Γ[1], 2), ψ.Γ))
+        _schmidt_canonical_streaming
+    else
+        schmidt_canonical
     end
+    tensors, spectra = split(ψ.Γ, ψ.λ[end];
+        maxdim, cutoff, renormalize, noninjective, symmetry_break, tol, maxiter)
+    # Truncation can break the canonical gauge. Run the same split on the
+    # truncated state so that the second pass keeps its seam and order.
+    if length.(spectra) != length.(ψ.λ)
+        # Keep the storage precision of the first pass, as if it had
+        # already been assigned to the iMPS.
+        tensors = convert(typeof(ψ.Γ), tensors)
+        spectra = convert(typeof(ψ.λ), spectra)
+        tensors, spectra = split(tensors, spectra[end];
+            maxdim, cutoff, renormalize,
+            noninjective=noninjective === :error ? :error : :ignore,
+            symmetry_break=:none, tol, maxiter)
+    end
+    ψ.Γ .= tensors
+    ψ.λ .= spectra
     return ψ
 end
 
@@ -567,13 +567,16 @@ function expect(ψ::iMPS, O::AbstractMatrix, i::Integer, j::Integer)
     # expect(ψ, h, n, n + 1) measures the wraparound bond instead of throwing.
     i0, j0 = _normalize_gate_sites(ψ, i, j)
     inds = _gate_indices(ψ, i0, j0)
-    Γ = ψ.Γ[inds]
-    λl = ψ.λ[mod(i0-2,ψ.n)+1]
     # Same boundary conversion as applygate!: user operators follow the
     # documented kron convention (leftmost site ↔ leftmost factor), while the
     # fused-leg contraction puts the leftmost site's index fastest.
-    O_int = _operator_to_internal(O, Int[size(Γk, 2) for Γk in Γ])
-    ocontract(Γ, O_int, λl) |> real
+    O_int = _operator_to_internal(O, Int[size(ψ.Γ[k], 2) for k in inds])
+    return _expect_internal(ψ, O_int, inds)
+end
+
+function _expect_internal(ψ::iMPS, O, inds)
+    λl = ψ.λ[mod1(first(inds) - 1, ψ.n)]
+    return real(ocontract(ψ.Γ[inds], O, λl))
 end
 
 
@@ -626,3 +629,18 @@ Notes:
   by [`inner_product`](@ref) to define the overlap per unit cell.
 """
 gtrm(mps1::iMPS, mps2::iMPS) = gtrm(mps1.Γ, mps2.Γ)
+
+function apply_chain_transfer(
+    ψ1::iMPS{<:AbstractArray{<:Number, 3}},
+    ψ2::iMPS{<:AbstractArray{<:Number, 3}},
+    ρ::AbstractMatrix;
+    dir::Symbol=:r,
+)
+    return apply_chain_transfer(ψ1.Γ, ψ2.Γ, ρ; dir)
+end
+
+function apply_chain_transfer(
+    ψ::iMPS{<:AbstractArray{<:Number, 3}}, ρ::AbstractMatrix; dir::Symbol=:r
+)
+    return apply_chain_transfer(ψ, ψ, ρ; dir)
+end

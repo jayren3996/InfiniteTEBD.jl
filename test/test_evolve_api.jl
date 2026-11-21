@@ -18,6 +18,40 @@ end
 schedule_layers(schedule) = first.(schedule)
 schedule_coeffs(schedule) = last.(schedule)
 
+@testset "STREAMED TROTTER SCHEDULE REUSES MERGED BOUNDARIES" begin
+    X = ComplexF64[0 1; 1 0]
+    Z = Diagonal(ComplexF64[1, -1])
+    layers = [[(X, 1, 1)], [(Z, 1, 1)]]
+    for (L, order) in ((layers[1:1], :second), (layers, :second), (layers, :fourth),
+                       (layers, :fourth_opt), ([layers..., layers[1][1:0]], :fourth)),
+        steps in (0, 1, 2, 5)
+        compact = InfiniteTEBD._iterated_trotter_gates(L, 0.13, steps; trotter=order, evolution=:real)
+        @test collect(compact) == trotter_gates(L, 0.13; trotter=order, steps)
+    end
+end
+
+@testset "EVOLVE FIXED-DIMENSION CHECKPOINT AFTER MACRO STEP" begin
+    h = kron(Diagonal([1.0, -1]), Diagonal([1.0, -1]))
+    layers = [[(h, 1, 2)], [(h, 3, 4)]]
+    rng = MersenneTwister(659)
+    initial = iMPS(ComplexF64, [randn(rng, ComplexF64, 3, 2, 3) for _ in 1:4])
+    manual, layered = deepcopy(initial), deepcopy(initial)
+    gates = trotter_gates(layers, 0.2; evolution=:imaginary)
+    for _ in 1:3
+        evolve!(manual, gates, 1; maxdim=3)
+        restore_canonical!(manual; method=:auto)
+    end
+    evolve!(layered, layers, 0.2, 3; maxdim=3, evolution=:imaginary, gauge=:auto)
+    @test inner_product(manual, layered) ≈ 1 atol=1e-11
+    @test InfiniteTEBD._check_restored_gauge(layered, 1e-10)
+
+    untouched = deepcopy(initial)
+    X = ComplexF64[0 1; 1 0]
+    @test_throws DimensionMismatch evolve!(untouched,
+        [(X, 1, 1), (zeros(ComplexF64, 3, 3), 2, 2)], 1; gauge=:auto)
+    @test untouched.Γ == initial.Γ && untouched.λ == initial.λ
+end
+
 @testset "EVOLVE_FIXED_POLICY" begin
     X = [0.0 1.0; 1.0 0.0]
     G = kron(X, X)
@@ -125,7 +159,7 @@ end
 end
 
 @testset "TROTTER_GATE_CACHE_REUSES_FOR_REPEATED_COEFFS" begin
-    # _materialize_trotter_gates caches exp(coeff * h) by (layer, term, coeff)
+    # _materialize_trotter_gates caches exp(coeff * h) by matrix identity and coefficient
     # so palindromic Trotter schemes can reuse the matrix exponential when the
     # same coefficient appears multiple times. A regression in the cache key
     # (e.g. coeff equality drift from float arithmetic) would show up here as
@@ -143,14 +177,47 @@ end
     @test length(gates) == 11
     @test length(unique(objectid(g) for (g, _, _) in gates)) <= 6
 
-    # Multi-step schedule via the internal helper. Stage 1 of step k+1 merges
+    # Stage 1 of step k+1 merges
     # with stage 11 of step k (both layer 1, coeff A1), so the per-step stage
     # count decreases.
-    stages_3 = InfiniteTEBD._trotter_stage_schedule(2, :fourth_opt, 3)
-    gates_3 = InfiniteTEBD._materialize_trotter_gates(layers, 0.1, stages_3; evolution=:real)
+    gates_3 = trotter_gates(layers, 0.1; trotter=:fourth_opt, steps=3)
     @test length(gates_3) < 33  # naive count would be 11 * 3 = 33
     # The cache should still produce a small number of unique matrices.
     @test length(unique(objectid(g) for (g, _, _) in gates_3)) <= 8
+
+    # Repeated translations of the same density also share their exponent.
+    translated = trotter_gates([[(X, 1, 2), (X, 3, 4)], [(X, 2, 3)]], 0.1)
+    @test translated[1][1] === translated[2][1]
+    @test translated[1][1] !== translated[3][1]
+end
+
+@testset "TROTTER_GATE_LIST_REPRODUCES_LAYERED_EVOLUTION" begin
+    X = ComplexF64[0 1; 1 0]
+    Z = ComplexF64[1 0; 0 -1]
+    h = kron(X, X) + 0.2 * kron(Z, X)
+    layers = [[(h, 1, 2)], [(h, 2, 1)]]
+    dt = 0.5
+    steps = 3
+    options = (; maxdim=1, return_stats=true)
+    @test isempty(trotter_gates(layers, dt; steps=0))
+    @test_throws ArgumentError trotter_gates(layers, dt; steps=-1)
+    @test length(trotter_gates(layers[1:1], dt; steps)) == steps
+
+    for (trotter, evolution) in ((:second, :real), (:fourth, :real),
+                                 (:fourth_opt, :real), (:second, :imaginary))
+        ψ_layered = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
+        ψ_prebuilt = deepcopy(ψ_layered)
+        gates = trotter_gates(layers, dt; trotter, evolution, steps)
+        one_step = trotter_gates(layers, dt; trotter, evolution)
+        @test length(gates) == steps * length(one_step) - (steps - 1)
+
+        _, layered_stats = evolve!(ψ_layered, layers, dt, steps; trotter, evolution, options...)
+        _, prebuilt_stats = evolve!(ψ_prebuilt, gates, 1; options...)
+        @test layered_stats == prebuilt_stats
+        @test layered_stats.max_discarded_weight > 0
+        @test ψ_layered.Γ ≈ ψ_prebuilt.Γ
+        @test ψ_layered.λ ≈ ψ_prebuilt.λ
+    end
 end
 
 @testset "EVOLVE_SINGLE_SITE_CELL_UNDER_ADAPTIVE" begin
@@ -322,9 +389,8 @@ end
     @test_throws ArgumentError evolve!(psi, layers3, 0.1, 1; trotter=:fourth_opt)
     @test_throws ArgumentError evolve!(psi, layers2, 0.1, 1; trotter=:fourth_opt, evolution=:imaginary)
 
-    # trotter=:fourth with a single layer would silently collapse to a
-    # first-order Euler step because the five Suzuki substeps all target the
-    # same layer and merge into one stage. Reject up front.
+    # Single-layer calls use :second, which already gives the exact layer
+    # exponential before any bond truncation.
     @test_throws ArgumentError trotter_gates(layers1, 0.1; trotter=:fourth)
     @test_throws ArgumentError evolve!(psi, layers1, 0.1, 1; trotter=:fourth)
 end
@@ -401,4 +467,24 @@ end
     @test gates isa Vector
     @test eltype(gates) <: Tuple{AbstractMatrix, Int, Int}
     @test eltype(first(gates)[1]) <: ComplexF64
+end
+
+@testset "TROTTER_DIAGONAL_STORAGE" begin
+    H = Diagonal([0.1, 0.9, -0.3, 0.5])
+    X = ComplexF64[0 1; 1 0]
+    for evolution in (:real, :imaginary)
+        gates = trotter_gates([[(H, 1, 2)]], 0.1; evolution)
+        @test first(gates)[1] isa Diagonal
+        scale = evolution === :real ? -0.1im : -0.1
+        @test first(gates)[1].diag ≈ exp.(scale .* H.diag)
+    end
+    layers = [[(H, 1, 2)], [(kron(X, X), 2, 1)]]
+    dense_layers = [[(Matrix(h), i, j) for (h, i, j) in layer] for layer in layers]
+    gates = trotter_gates(layers, 0.1; trotter=:fourth)
+    @test any(g -> g[1] isa Diagonal, gates)
+    a = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
+    b = deepcopy(a)
+    evolve!(a, layers, 0.1, 3; trotter=:fourth, maxdim=4)
+    evolve!(b, dense_layers, 0.1, 3; trotter=:fourth, maxdim=4)
+    @test inner_product(a, b) / sqrt(inner_product(a) * inner_product(b)) ≈ 1 atol=1e-10
 end

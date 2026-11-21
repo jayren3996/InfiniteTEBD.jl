@@ -55,7 +55,48 @@ This divides the absorbed Schmidt values back out of `ψ.Γ[i]` on the fly and r
 canonical!(ψ; maxdim=MAXDIM, cutoff=SVDTOL, renormalize=true)
 ```
 
-The routine groups the unit cell into a single block, solves for the left and right transfer-matrix fixed points, performs the gauge SVD on the effective bond problem, truncates according to `maxdim` and `cutoff`, and writes the right-canonical tensors back into `ψ.Γ` and the Schmidt spectra into `ψ.λ`. If truncation changes any bond dimension, a second pass restores the exact right-canonical gauge that a single truncated SVD only achieves approximately. The state is mutated in place and the same object is returned.
+Dense cells use the stored wraparound bond as the initial cut. When a
+fused prefix would exceed 1 MiB or the physical dimensions vary by site,
+the implementation applies transfer maps site by site and builds an
+untruncated right-isometric suffix using LQ. The subsequent left-to-right
+SVD sweep starts at the same seam and sees the same nonzero cut spectra
+as the grouped implementation, up to rounding. If a cutoff crosses a
+degenerate spectrum, the retained basis can depend on the decomposition.
+A second pass restores the gauge when truncation changes a bond dimension.
+
+For a multi-site cell with `renormalize=false`, the split leaves the
+overall scale of the retained state in the tensors. A cutoff or rank cap
+can reduce that scale. With no truncation the per-cell norm is preserved.
+The one-site path includes its historical final normalization. The
+streaming path checks the transfer spectrum on small virtual bonds and
+uses a diagonal-sector diagnostic on larger bonds. TensorKit has its
+own canonicalization implementation.
+
+[`restore_canonical!`](@ref) restores the gauge of an injective dense iMPS at
+fixed bond dimensions. The default Gram method sweeps the left and right
+transfer environments site by site, starts from a smallest virtual bond,
+and normalizes the state per cell. It requires numerically invertible right
+environments on the stored bonds.
+
+For an ill-conditioned basis, call `restore_canonical!(ψ; method=:qr)`.
+This iterates local LQ and QR factorizations until the virtual carry closes
+across the seam. It obtains Schmidt values from SVDs on the virtual-bond
+centers. Both methods avoid grouping physical legs. The QR method requires
+full support at the stored bond dimensions. Use `tol` and `maxiter` to
+control the seam solve. Mixed-transfer Arnoldi can propose a seam carry
+when the sweeps are slow. Set `accelerate=false` for plain sweeps.
+A failed solve leaves the original state intact.
+
+For dense states, `restore_canonical!(ψ; method=:auto)` tries Gram on a
+candidate state. It checks both the right-isometry and left Schmidt
+residuals before accepting that candidate, then retries with QR from the
+original state if that check or the Gram numerical solve fails. A small
+seam is also checked for multiple peripheral transfer eigenvalues. The
+default is `method=:gram`.
+
+For compression at large `n`, [`truncate_unitcell!`](@ref) uses local SVDs to
+cap the bond dimensions. Pass `recanonicalize=true` to restore the global
+gauge of the compressed state with the same site-by-site transfer method.
 
 !!! warning "Injective setting"
     This canonicalization path assumes a non-degenerate transfer spectrum. For

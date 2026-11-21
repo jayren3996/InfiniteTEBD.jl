@@ -74,6 +74,41 @@ psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 inner_product(psi)
 ```
 
+## Matrix-free transfer maps
+
+Use [`apply_chain_transfer`](@ref) to apply the transfer map of one dense
+iMPS, or the mixed map of two dense states with equal unit-cell lengths and
+matching physical dimensions. `apply_chain_transfer(ψ₁, ψ₂, ρ)` uses the
+complex conjugate of the stored tensors of `ψ₁` and the stored tensors of
+`ψ₂`. The rows of `ρ` belong to the wraparound bond of `ψ₂` and the columns
+belong to that of `ψ₁`. The bond dimensions may differ.
+
+The right sweep (`dir=:r`) acts as `E_cell * vec(ρ)`. The left sweep
+(`dir=:l`) acts as `transpose(E_cell) * vec(ρ)`. Its result pairs with the
+right sweep through the bilinear pairing `sum(L .* R)`.
+Both directions contract one site at a time without building `E_cell`.
+For a single site, [`apply_transfer`](@ref) takes the two local tensors and
+an environment matrix directly.
+
+The self transfer is `apply_chain_transfer(ψ, ρ)`. For example, its right
+fixed point is the identity when the state is right-canonical and normalized:
+
+```@example
+using InfiniteTEBD
+using LinearAlgebra
+
+ψ = rand_iMPS(ComplexF64, 2, 2, 3)
+canonical!(ψ)
+χ = length(schmidt_values(ψ, ψ.n))
+seed = Matrix{ComplexF64}(I, χ, χ)
+transfer = ρ -> apply_chain_transfer(ψ, ρ)
+transfer(seed) ≈ seed
+```
+
+Pass `transfer` and a seed matrix to an iterative eigensolver to compute
+eigenvectors or subleading eigenvalues in addition to the dominant eigenvalue
+magnitude returned by `inner_product`.
+
 ## Local expectation values
 
 `expect(ψ, O, i, j)` returns the real part of the expectation value of `O`

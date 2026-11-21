@@ -363,3 +363,235 @@ end
     @test right_canonical_error(psi) <= 1e-9
     assert_normalized_schmidt_spectra(psi; atol=1e-9)
 end
+
+@testset "SITEWISE_CANONICAL_GAUGE_RESTORATION" begin
+    rng = MersenneTwister(196)
+    dims = [3, 2, 4, 3, 2, 3, 4, 3]
+    n = length(dims)
+    tensors = [randn(rng, ComplexF64, dims[mod1(i-1, n)], 2, dims[i]) / 2 for i in 1:n]
+    original = iMPS(tensors, [ones(d) for d in dims], n)
+    ψ = deepcopy(original)
+    grouped = canonical!(deepcopy(original); maxdim=4, cutoff=1e-12, noninjective=:ignore)
+    @test restore_canonical!(ψ) === ψ
+    @test length.(ψ.λ) == dims
+    @test inner_product(ψ) ≈ 1 atol=1e-10
+    @test abs(inner_product(original, ψ)) / sqrt(inner_product(original)) ≈ 1 atol=1e-10
+    @test right_canonical_error(ψ) < 1e-10
+    for i in 1:n
+        pleft = Diagonal(ψ.λ[mod1(i-1, n)] .^ 2)
+        B = ψ.Γ[i]
+        propagated = sum(B[:, s, :]' * pleft * B[:, s, :] for s in axes(B, 2))
+        @test propagated ≈ Diagonal(ψ.λ[i] .^ 2) atol=1e-10
+        @test ψ.λ[i] ≈ grouped.λ[i] atol=1e-9
+    end
+
+    ψ = deepcopy(original)
+    compressed = truncate_unitcell!(deepcopy(ψ), 2)
+    @test truncate_unitcell!(ψ, 2; recanonicalize=true) === ψ
+    @test maximum(length.(ψ.λ)) <= 2
+    @test right_canonical_error(ψ) < 1e-10
+    @test abs(inner_product(compressed, ψ)) / sqrt(inner_product(compressed)) ≈ 1 atol=1e-10
+
+    local_tensor = reshape([0.8, 0.6], 1, 2, 1)
+    large = iMPS([2 .* local_tensor for _ in 1:32], [ones(1) for _ in 1:32], 32)
+    restore_canonical!(large)
+    @test right_canonical_error(large) < 1e-10
+    @test inner_product(large) ≈ 1 atol=1e-10
+
+    singular_tensor = zeros(2, 2, 2)
+    singular_tensor[1, 1, 1] = 1
+    singular = iMPS([singular_tensor], [ones(2)], 1)
+    before = deepcopy(singular)
+    @test_throws ArgumentError restore_canonical!(singular)
+    @test singular.Γ == before.Γ && singular.λ == before.λ
+end
+
+@testset "STREAMING_CANONICAL_MATCHES_GROUPED_CUTS" begin
+    rng = MersenneTwister(533)
+    dims = [4, 2, 4, 3, 4, 4]  # The fastest transfer solve is off the original seam.
+    n = length(dims)
+    tensors = [randn(rng, ComplexF64, dims[mod1(i-1,n)], 2, dims[i]) /
+               sqrt(2*dims[i]) for i in 1:n]
+    seam = [0.8, 0.7, 0.6, 0.4]
+    ψ = iMPS(tensors, [i == n ? seam : ones(dims[i]) for i in 1:n], n)
+    for renormalize in (false, true), (maxdim, cutoff) in ((4, 1e-12), (2, 1e-12), (4, 0.14))
+        opts = (; maxdim, cutoff, renormalize, noninjective=:ignore,
+                  symmetry_break=:none, tol=nothing, maxiter=nothing)
+        A, λ = InfiniteTEBD.schmidt_canonical(ψ.Γ, ψ.λ[end]; opts...)
+        B, μ = InfiniteTEBD._schmidt_canonical_streaming(ψ.Γ, ψ.λ[end]; opts...)
+        @test length.(λ) == length.(μ)
+        @test all(isapprox.(λ, μ; atol=1e-11, rtol=1e-9))
+        @test inner_product(B) ≈ inner_product(A) rtol=1e-9
+        @test inner_product(A, B) ≈ inner_product(A) rtol=1e-9
+        if maxdim == 4 && cutoff == 1e-12 && !renormalize
+            @test inner_product(B) ≈ inner_product(ψ) rtol=1e-9
+        end
+
+        grouped = canonical!(deepcopy(ψ); opts...)
+        # A zero-padded physical direction changes the execution path
+        # without changing the input or the prescribed seam/cutoff.
+        source = deepcopy(ψ)
+        source.Γ[2] = cat(source.Γ[2], zeros(ComplexF64, dims[1], 1, dims[2]); dims=2)
+        canonical!(source; opts...)
+        grouped.Γ[2] = cat(grouped.Γ[2],
+            zeros(ComplexF64, size(grouped.Γ[2],1), 1, size(grouped.Γ[2],3)); dims=2)
+        @test length.(source.λ) == length.(grouped.λ)
+        @test all(isapprox.(source.λ, grouped.λ; atol=1e-10, rtol=1e-8))
+        @test inner_product(source, grouped) ≈ inner_product(grouped) rtol=1e-8
+    end
+end
+
+@testset "STREAMING_CANONICAL_FLOAT32_KRYLOV" begin
+    rng = MersenneTwister(648)
+    χ = 9
+    tensors = [randn(rng, Float32, χ,d,χ) ./ sqrt(Float32(d*χ)) for d in (2, 3, 2, 2)]
+    original = iMPS(Float32, tensors; renormalize=false)
+    ψ = canonical!(deepcopy(original); maxdim=χ, noninjective=:ignore)
+    @test eltype(ψ) === Float32
+    @test right_canonical_error(ψ) < 2e-5
+    @test inner_product(ψ) ≈ 1 atol=2e-5
+    @test inner_product(original, ψ) / sqrt(inner_product(original)) ≈ 1 atol=2e-5
+end
+
+@testset "STREAMING_CANONICAL_DIAGNOSES_GHZ" begin
+    A = zeros(ComplexF64, 2, 2, 2)
+    A[1, 1, 1] = A[2, 2, 2] = 1
+    n = 16
+    ψ = iMPS([copy(A) for _ in 1:n], [ones(2) for _ in 1:n], n)
+    @test !InfiniteTEBD._fits_grouped_cell(ψ)
+    before = deepcopy(ψ)
+    @test_throws ArgumentError canonical!(ψ; noninjective=:error)
+    @test ψ.Γ == before.Γ && ψ.λ == before.λ
+    @test_logs (:warn, r"selected virtual sector 1 of 2") canonical!(ψ; symmetry_break=:auto)
+    @test length.(ψ.λ) == ones(Int,n)
+    @test inner_product(ψ) ≈ 1 atol=1e-12
+    @test expect(ψ, Diagonal([1.0, -1.0]), 1, 1) ≈ 1 atol=1e-12
+end
+
+@testset "CANONICAL_LARGE_CELL_DISPATCH" begin
+    rng = MersenneTwister(231)
+    n, d, χ = 9, 4, 3
+    ψ = iMPS([randn(rng, ComplexF64, χ, d, χ) / sqrt(d*χ) for _ in 1:n],
+             [ones(χ) for _ in 1:n], n)
+    @test !InfiniteTEBD._fits_grouped_cell(ψ)
+    original = deepcopy(ψ)
+    target_norm = inner_product(ψ)
+    @test canonical!(ψ; maxdim=χ, renormalize=false) === ψ
+    @test inner_product(ψ) ≈ target_norm rtol=1e-10
+    @test inner_product(original, ψ) ≈ target_norm rtol=1e-10
+
+    canonical!(ψ; maxdim=2)
+    @test maximum(length.(ψ.λ)) == 2
+    @test right_canonical_error(ψ) < 1e-9
+    @test inner_product(ψ) ≈ 1 atol=1e-10
+
+    # Recanonicalizing across the seam and adaptive updates both delegate
+    # to the same bounded-memory canonical! path.
+    X = ComplexF64[0 1 0 0; 1 0 0 0; 0 0 0 1; 0 0 1 0]
+    G = exp(-0.02im * kron(X, X))
+    applygate!(ψ, G, n, 1; maxdim=3, recanonicalize=true)
+    @test right_canonical_error(ψ) < 1e-9
+    evolve!(ψ, [(G, 1, 2)], 1; maxdim=3, chi_policy=:adaptive)
+    @test right_canonical_error(ψ) < 1e-9
+
+    large_product = product_iMPS(ComplexF64, fill([1, 1im, 0, 0], 48))
+    @test length.(large_product.λ) == ones(Int, 48)
+    @test right_canonical_error(large_product) < 1e-12
+
+    padded = zeros(ComplexF64, 3, 4, 3)
+    padded[1, 1, 1] = 1
+    state = iMPS([copy(padded) for _ in 1:n], [ones(3) for _ in 1:n], n)
+    canonical!(state)
+    @test length.(state.λ) == ones(Int, n)
+    @test inner_product(state) ≈ 1 atol=1e-10
+end
+
+@testset "PERIODIC_QR_RESTORES_ILL_CONDITIONED_GAUGES" begin
+    rng = MersenneTwister(4001)
+    dims = [2, 3, 4, 3]
+    n = length(dims)
+    rand_tensors = [randn(rng, ComplexF64, dims[mod1(i-1,n)], 3, dims[i]) for i in 1:n]
+    reference = iMPS(rand_tensors, [ones(d) for d in dims], n)
+    restore_canonical!(reference)
+    Z = Diagonal([1.0, -0.2, 0.7])
+
+    for magnitude in (1e-8, 1e-10)
+        # Apply an invertible virtual basis change, including on the
+        # smallest bond where the iterations close the unit cell.
+        gauges = [Diagonal([ones(d-1); magnitude]) for d in dims]
+        A = [InfiniteTEBD.canonical_gauging(reference.Γ[i], gauges[i],
+                    inv(gauges[mod1(i-1,n)])) .* 1.3 for i in 1:n]
+        ψ = iMPS(A, [ones(d) for d in dims], n)
+        @test restore_canonical!(ψ; method=:qr) === ψ
+        @test length.(ψ.λ) == dims
+        @test inner_product(ψ) ≈ 1 atol=1e-10
+        @test inner_product(reference, ψ) ≈ 1 atol=1e-10
+        @test right_canonical_error(ψ) < 1e-10
+        auto = iMPS(copy(A), [ones(d) for d in dims], n)
+        restore_canonical!(auto; method=:auto)
+        @test inner_product(reference, auto) ≈ 1 atol=1e-10
+        for i in 1:n
+            previous = mod1(i-1, n)
+            @test ψ.λ[i] ≈ reference.λ[i] atol=1e-9
+            @test expect(ψ, Z, i, i) ≈ expect(reference, Z, i, i) atol=1e-9
+            B = ψ.Γ[i]
+            density = sum(B[:,s,:]' * Diagonal(ψ.λ[previous].^2) * B[:,s,:] for s in axes(B, 2))
+            @test density ≈ Diagonal(ψ.λ[i].^2) atol=1e-10
+        end
+
+        order = [3:n; 1:2]
+        rolled = iMPS(A[order], [ones(dims[i]) for i in order], n)
+        restore_canonical!(rolled; method=:qr)
+        @test inner_product(ψ.Γ[order], rolled.Γ) ≈ 1 atol=1e-10
+    end
+
+    real_state = rand_iMPS(Float64, 3, 2, 2)
+    single = mps_promote_type(Float32, real_state)
+    @test restore_canonical!(single; method=:qr) === single
+    @test eltype(single) === Float32
+    @test right_canonical_error(single) < 1e-5
+    @test inner_product(real_state, single) ≈ 1 atol=1e-5
+
+    rank_one = zeros(2,2,2)
+    rank_one[1,1,1] = 1
+    ghz = copy(rank_one)
+    ghz[2,2,2] = 1
+    for A in (rank_one, ghz)
+        ψ = iMPS([copy(A)], [ones(2)], 1)
+        before = deepcopy(ψ)
+        @test_throws ArgumentError restore_canonical!(ψ; method=:qr)
+        @test ψ.Γ == before.Γ && ψ.λ == before.λ
+        @test_throws ArgumentError restore_canonical!(ψ; method=:auto)
+        @test ψ.Γ == before.Γ && ψ.λ == before.λ
+    end
+    trial = iMPS(copy(rand_tensors), [ones(d) for d in dims], n)
+    before = deepcopy(trial)
+    @test_throws ErrorException restore_canonical!(trial; method=:qr, maxiter=1)
+    @test trial.Γ == before.Γ && trial.λ == before.λ
+    @test_throws ArgumentError restore_canonical!(trial; method=:qr, tol=0)
+
+    # A gapped but nearly reducible transfer has a unique physical state.
+    # The plain sweep need not close within a small iteration budget.
+    p = 1e-6
+    g = Diagonal([0.2, 1.0])
+    blocks = (sqrt(1-p) * Matrix{Float64}(I, 2, 2),
+              sqrt(p/2) * [0.0 1.0; 1.0 0.0],
+              sqrt(p/2) * [1.0 0.0; 0.0 -1.0])
+    A = zeros(2, 3, 2)
+    for (s, block) in enumerate(blocks)
+        A[:,s,:] = g \ (block * g)
+    end
+    slow = iMPS([A], [ones(2)], 1)
+    untouched = deepcopy(slow)
+    @test_throws ErrorException restore_canonical!(slow; method=:qr, maxiter=64, accelerate=false)
+    @test slow.Γ == untouched.Γ && slow.λ == untouched.λ
+    restore_canonical!(slow; method=:qr, maxiter=64)
+    # cat places the physical axis last; the iMPS layout is left, physical, right.
+    known = iMPS([permutedims(cat(blocks...; dims=3), (1,3,2))], [fill(inv(sqrt(2)), 2)], 1)
+    @test inner_product(known, slow) ≈ 1 atol=1e-9
+
+    one = rand_iMPS(ComplexF64, 1, 3, 2)
+    copy_one = deepcopy(one)
+    restore_canonical!(one; method=:qr)
+    @test inner_product(copy_one, one) ≈ 1 atol=1e-10
+end

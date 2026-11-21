@@ -8,6 +8,10 @@ This page assumes you have run the dense examples in
 [States and Canonical Form](imps.md) and now want to take advantage of a
 symmetry your model has.
 
+Use TensorKit 0.17.3 or newer in the 0.17 series for a stock installation.
+TensorKit 0.16.5 can fail while repartitioning fusion trees on Julia 1.10
+and 1.12. The documentation examples use the 0.17 series.
+
 !!! tip "No TensorKit experience needed"
     You do not need any prior experience with TensorKit. The sections below
     introduce charges, flux, and arrow conventions from zero.
@@ -19,6 +23,26 @@ this, every internal tensor splits into independent blocks labelled by `Sz`,
 so at a fixed bond dimension `χ` only about `1/√χ` of the dense data still
 needs to be stored — a memory saving that grows like `√χ`. The numerical
 answer is unchanged; the runtime and memory both shrink.
+
+For a multi-site symmetric cell, `canonical!` starts the transfer solve
+at the bond with the smallest neutral operator space. It tests the identity
+and stored Schmidt environments against the relative transfer residual
+before starting Krylov iteration. It propagates the results back to the
+wraparound bond and uses an untruncated block-sparse LQ sweep followed by
+left-to-right SVD truncation. The physical split keeps its original starting
+bond and avoids forming the tensor with all of the cell's physical legs.
+
+[`restore_canonical!`](@ref) also supports injective TensorKit states with
+full numerical Schmidt support. It keeps every graded bond space and
+normalizes the state per cell. It propagates the left and right transfer
+environments site by site and checks the resulting gauges before updating
+the state. Use `canonical!` when the bond spaces need truncation. The
+TensorKit restoration method uses `method=:gram`.
+
+Both functions assume a unique physical transfer fixed point. For a small
+graded bond, `noninjective=:warn` or `:error` inspects the peripheral
+transfer eigenvalues that act on symmetry-preserving environments. This
+diagnostic covers neutral operator spaces of dimension at most 32.
 
 ## Sectors, charges, graded spaces
 
@@ -148,6 +172,25 @@ evolve!(ψ, gates, 60; maxdim=16, cutoff=1e-10)
 energy_density(ψ, h)
 ```
 
+For Abelian nearest-neighbour gates, `truncerr` targets the fraction of
+squared singular values discarded across the entire cut, including all
+charge sectors. `maxdim` caps the total dimension. When using discarded-weight
+truncation, `mindim` sets the minimum and can keep values below
+`svd_min` (also called `cutoff`). Use `return_stats=true` to inspect the
+required rank, actual kept rank and discarded weight.
+
+```julia
+ψ, stats = evolve!(ψ, gates, 1; maxdim=16, truncerr=1e-8, return_stats=true)
+stats.max_discarded_weight
+```
+
+`applygate!(ψ, G, i, j; gauge=:gram)` restores the full graded gauge after
+one gate, and `evolve!(ψ, gates, steps; gauge=:gram)` restores it after
+each gate-list sweep. Both keep the bond spaces produced by the local gate
+cuts. `recanonicalize=true` performs the legacy wraparound
+canonicalization, which can truncate other bonds as well. Gate statistics
+describe the local cut.
+
 ```@example xxz
 # Schmidt spectrum on bond 1 — `schmidt_values` flattens all sectors
 # into a single descending-sorted Vector{Float64}. To inspect the
@@ -169,11 +212,10 @@ schmidt_values(ψ, 1)
   (or add it to your project) and retry.
 - `graded_space(:ZN, N, …) requires N ≥ 2 (got 1)` — Z_1 is trivial;
   use `:Trivial` instead.
-- `ArgumentError: canonical!: asymmetric transfer eigenvalues (λ_r=..., λ_l=...)` —
-  your state is in a non-injective regime that the v1 symmetric `canonical!`
-  refuses to handle (to avoid silently producing a corrupted state). Try a
-  different random seed or construct the state in a fixed flux sector via
-  `product_iMPS`.
+- `ArgumentError: canonical!: inconsistent left/right transfer rates` —
+  the fixed-point solves disagree on the dominant transfer rate. Check
+  convergence and whether one physical sector dominates. Degenerate
+  peripheral eigenvalues can coexist with matching transfer rates.
 
 ## See also
 

@@ -40,6 +40,20 @@ evolve!(ψ, gates, steps; chi_policy=:fixed, maxdim=MAXDIM, ...)
 with each element of `gates` written as `(G, i, j)`. The truncation keywords
 have the same meaning as above and are applied to every gate in the sweep.
 
+### Fixed-bond-dimension gauge checkpoints
+
+Use `gauge=:auto` on a dense state to restore the global Schmidt gauge after
+one `applygate!` update or after every full `evolve!` sweep. Choose
+`:gram` or `:qr` to force a specific restoration method. TensorKit supports
+`gauge=:gram`. The checkpoint normalizes the state, preserves the bond
+dimensions left by the local SVD, and requires full numerical support on
+those bonds.
+
+The older `recanonicalize=true` keyword runs the truncating `canonical!`
+after a wrap gate, or after any update made with `apply_endpoint_gate!`.
+Use either `gauge` or `recanonicalize` in a call. The returned bond statistics
+describe the local gate cuts.
+
 ## Hamiltonian layers and Trotter order
 
 Given a Hamiltonian split into commuting layers, the package can build the
@@ -55,10 +69,22 @@ caller is responsible for checking commutation. To inspect or reuse the gate
 list explicitly,
 
 ```julia
-trotter_gates(layers, dt; trotter=:second, evolution=:real)
+gates = trotter_gates(layers, dt; trotter=:second, evolution=:real, steps)
+evolve!(ψ, gates, 1; maxdim)
 ```
 
-returns one macro-step as a vector of `(G, i, j)` tuples.
+The gate list contains `(G, i, j)` tuples for the full requested interval.
+`steps` defaults to one. For multiple layers, the schedule combines adjacent
+substeps of the same layer at macro-step boundaries, just as layered
+`evolve!` does. Repeating a one-step gate list keeps the intermediate gate
+applications and truncations. Use that form when you need to sample or apply
+another operation after each macro-step.
+
+Layered `evolve!` reuses the gates of its repeating schedule, so its
+prepared schedule takes the same space for a short or long evolution. With
+`gauge` enabled, it keeps each macro-step boundary explicit and restores the
+gauge there. At a finite bond cap, keeping the two half-steps can change the
+trajectory because they each have a local cutoff.
 
 ### Choosing a Trotter scheme
 
@@ -68,17 +94,15 @@ Three schemes are available:
 |-----------|-------|--------|-----------|-------------------------|
 | `:second` | 2 | any | real or imaginary | one Strang sweep |
 | `:fourth_opt` | 4 | exactly two | real only | eleven elementary substeps |
-| `:fourth` | 4 | any | real only | five Strang sweeps |
+| `:fourth` | 4 | two or more | real only | five Strang sweeps |
 
 - `trotter=:second` — Strang splitting on any number of layers. Required for
   imaginary-time evolution. A sensible default for ground-state search.
 - `trotter=:fourth_opt` — Barthel-Zhang optimized fourth-order formula for
-  exactly two layers. Fewest substeps among the fourth-order options, so it is
-  the cheapest accurate choice for typical nearest-neighbor models in real time
-  at small `dt`.
-- `trotter=:fourth` — Suzuki's recursive fourth-order composition. Works for
-  any number of layers and is the right choice when the Hamiltonian needs more
-  than two commuting blocks.
+  exactly two layers. Its coefficients differ from Suzuki's two-layer sequence,
+  which also has eleven stages after merging.
+- `trotter=:fourth` — Suzuki's recursive fourth-order composition for two or
+  more layers.
 
 Both fourth-order schemes contain negative substeps, so they are restricted to
 real-time evolution; `evolution=:imaginary` is only valid with
@@ -102,6 +126,65 @@ evolve!(psi, layers, 0.1, 5; trotter=:fourth, maxdim=8)
 
 length(trotter_gates(layers, 0.1; trotter=:fourth_opt))
 ```
+
+`trotter_gates` preserves `Diagonal` Hamiltonian terms as diagonal gates,
+including in a sequence with both dense and diagonal terms. When the
+incoming Schmidt spectrum is ill-conditioned, a dense two-site update
+reconstructs the left tensor without dividing by those Schmidt values.
+Both reconstruction paths use the same SVD truncation rule and statistics.
+
+## Gates on two separated endpoints
+
+Use [`apply_endpoint_gate!`](@ref) when a two-site gate acts on the endpoints
+of a longer interval. Its matrix has size `(dleft*dright) × (dleft*dright)`.
+`applygate!` with an ordinary matrix still acts on every physical leg of
+the contiguous interval.
+
+```julia
+using LinearAlgebra
+
+d = 2
+z = [1, -1]
+G = Diagonal(exp.(-0.1im .* kron(z, z)))
+apply_endpoint_gate!(ψ, G, 5, 2; maxdim=32)
+
+# Prepare once, then reuse in the usual gate-list interface.
+gate = EndpointGate(G, (d, d))
+evolve!(ψ, [(gate, 5, 2)], 10; maxdim=32)
+```
+
+For a six-site cell, the example follows `5, 6, 1, 2`. A route must fit
+within a single cell. Choose the order of gates according to the physical
+Trotter layers. The library does not schedule simultaneous long-range gates.
+
+The default endpoint update factorizes the operator across its two physical
+sites. A right-to-left LQ sweep transports these factors along the interval.
+A left-to-right SVD sweep applies the usual bond truncation rule. This
+avoids both the fused interval tensor and explicit identity tensors between
+the endpoints. A `Diagonal` input uses the phase table directly during
+preparation and during a contiguous diagonal update. The optional
+`method=:swap` route performs ordinary physical-leg swaps and can truncate
+at additional cuts. Compare the two methods at matched error when choosing
+the working bond dimension. A prepared `EndpointGate` can also be used with
+`expect` to measure a two-site operator across the interval on a
+Schmidt-canonical state.
+
+To prepare a Hermitian product term directly, use
+`EndpointGate(A, B, -im*dt)`. It diagonalizes the two local operators and
+exponentiates the table of pairwise eigenvalue products before preparing the
+same operator Schmidt factors. The table has only `dleft*dright` entries.
+
+### Three-site controlled gates
+
+With diagonal projector controls `P` and `Q`, the three-site gate
+`ControlledGate(P, U, Q)` applies the central `U` on the selected subspace.
+The update uses the two product terms of
+`I + kron(P, U - I, Q)` and the same cut-wise SVD controller as a
+contiguous matrix gate. For a PXP term, prepare
+`ControlledGate(P, exp(-im*dt*X), P)`. It can be reused through
+`applygate!(ψ, gate, i, i+2)` or in an ordinary evolution gate list.
+For a Trotter sequence of prepared gates, [`trotter_stages`](@ref) gives
+the ordered layer numbers and coefficients to use when building each gate.
 
 ## Adaptive bond dimension
 

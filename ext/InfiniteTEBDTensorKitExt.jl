@@ -11,8 +11,9 @@ using KrylovKit: eigsolve
 import InfiniteTEBD: graded_space, spin_half_ops, schmidt_values
 import InfiniteTEBD: rand_iMPS, product_iMPS
 import InfiniteTEBD: iMPS, _validate_iMPS_bonds, _bond_dim
-import InfiniteTEBD: canonical!
+import InfiniteTEBD: canonical!, restore_canonical!
 import InfiniteTEBD: _resolve_svd_min, _validate_truncation_args, adaptive_bonddim
+import InfiniteTEBD: BondStat, _discarded_weight_choice, _gate_update_stats, _validate_gauge_checkpoint
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Chunk 3: Helper layer
@@ -570,8 +571,7 @@ in the codomain. Returns `(U, S, Vt, info)` where:
   reporting the discarded weight) — used by callers for sanity checks.
 
 This is the workhorse primitive used by `applygate!` to recanonicalise a
-two-site block after applying a gate. It is also exercised directly by the
-`canonical!` implementation when grouping the unit cell.
+two-site block after applying a gate.
 """
 function _symmetric_tsvd(A::AbstractTensorMap;
                          maxdim::Integer=InfiniteTEBD.MAXDIM,
@@ -583,6 +583,117 @@ function _symmetric_tsvd(A::AbstractTensorMap;
     # `cutoff` (`trunctol` filters by absolute value, default `by = abs`).
     strategy = truncrank(Int(maxdim)) & trunctol(; atol=Float64(cutoff))
     return svd_trunc!(B; trunc=strategy)
+end
+
+# Slice compact factors without another SVD. Each Abelian sector contributes
+# its prefix to the global leading spectrum. For a tie at the cut, consume
+# sectors in TensorKit storage order, matching its fixed-rank truncation.
+function _prefix_graded_svd(U, S, Vt, k, spectrum)
+    k == length(spectrum) && return U, S, Vt
+    edge = spectrum[k]
+    ties = k - count(>(edge), spectrum)
+    kept = map(collect(blocks(S))) do (sector, entries)
+        values = entries.diag
+        above = count(>(edge), values)
+        equal = min(ties, count(==(edge), values))
+        ties -= equal
+        return sector => above + equal
+    end
+    I = sectortype(S)
+    bond = I === Trivial ? ComplexSpace(k) : Vect[I](kept...)
+    Uk = similar(U, codomain(U) ← bond)
+    Sk = DiagonalTensorMap(Vector{eltype(S)}(undef, k), bond)
+    Vtk = similar(Vt, bond ← domain(Vt))
+    for (sector, count) in kept
+        iszero(count) && continue
+        inds = 1:count
+        block(Uk, sector) .= view(block(U, sector), :, inds)
+        block(Sk, sector).diag .= view(block(S, sector).diag, inds)
+        block(Vtk, sector) .= view(block(Vt, sector), inds, :)
+    end
+    return Uk, Sk, Vtk
+end
+
+function _symmetric_gate_cut(A; maxdim, mindim, truncerr, cutoff, return_stats)
+    if !return_stats && mindim == 1 && iszero(truncerr)
+        U, S, Vt, _ = _symmetric_tsvd(A; maxdim, cutoff)
+        return U, S, Vt, nothing
+    end
+
+    TensorKit.FusionStyle(sectortype(A)) isa TensorKit.UniqueFusion || throw(ArgumentError(
+        "symmetric discarded-weight controls require an Abelian bond space"))
+    U, S, Vt = svd_compact!(permute(A, ((1, 2), (3, 4))))
+    spectrum = _flatten_diagonal_blocks(S)
+    !isempty(spectrum) && isfinite(first(spectrum)) && first(spectrum) > 0 ||
+        throw(ArgumentError("symmetric gate produced no finite nonzero Schmidt weight"))
+
+    # There is one physical dimension per Abelian singular value. Choose
+    # from the entire spectrum using the dense rank policy. At the fixed-cap
+    # defaults, requesting diagnostics must keep the same rank as TensorKit.
+    choice = _discarded_weight_choice(spectrum; maxdim, mindim, truncerr, svd_min=cutoff)
+    k = if iszero(truncerr) && mindim == 1
+        min(maxdim, count(>=(cutoff), spectrum))
+    else
+        choice.chi_keep
+    end
+    k > 0 || throw(ArgumentError("symmetric gate retained no Schmidt values at svd_min=$cutoff"))
+    info = return_stats ? choice : nothing
+    if return_stats && k != choice.chi_keep
+        error_weight = 0.0
+        for i in length(spectrum):-1:k+1
+            error_weight += choice.weights[i]
+        end
+        info = merge(choice, (; chi_keep=k, discarded_weight=error_weight,
+            target_met=error_weight <= Float64(truncerr) * (1 + eps(Float64)),
+            smallest_kept_sv=spectrum[k],
+            largest_discarded_sv=k < length(spectrum) ? spectrum[k+1] : 0.0))
+    end
+    Uk, Sk, Vtk = _prefix_graded_svd(U, S, Vt, k, spectrum)
+    return Uk, Sk, Vtk, info
+end
+
+# Experimental graded cut factorization. The reduced space retains sectors;
+# final rank selection is a single TensorKit SVD across the projected blocks.
+function _symmetric_qr_split(M::AbstractTensorMap, seed::AbstractTensorMap;
+                             maxdim::Integer, cutoff::Real=InfiniteTEBD.SVDTOL,
+                             projection_tol::Real, expansion::Integer=2)
+    _validate_truncation_args(maxdim, 1, 0.0, cutoff)
+    isfinite(projection_tol) && 0 <= projection_tol <= 1 ||
+        throw(ArgumentError("projection_tol must be in [0, 1]"))
+    expansion >= 0 || throw(ArgumentError("expansion must be nonnegative"))
+    codomain(seed) == domain(M) || throw(DimensionMismatch("seed must span the right leg of the graded cut"))
+    weight = norm(M)^2
+    isfinite(weight) && weight > 0 || throw(ArgumentError("invalid graded cut norm"))
+    tolerance = 100 * eps(typeof(weight))
+    strategy = truncrank(Int(maxdim)) & trunctol(; atol=Float64(cutoff))
+    sizes = [sector => min(min(size(A)...), max(1, size(block(seed, sector), 2) + expansion))
+             for (sector, A) in blocks(M)]
+    if any(width < min(size(block(M, sector))...) for (sector, width) in sizes)
+        I = sectortype(M)
+        reduced = I === Trivial ? ComplexSpace(only(sizes).second) : Vect[I](sizes...)
+        Q = zeros(eltype(M), domain(M) ← reduced)
+        for (sector, width) in sizes
+            width == 0 && continue
+            A = Matrix(block(M, sector))
+            previous = Matrix(block(seed, sector))
+            copyto!(block(Q, sector), InfiniteTEBD._projected_right_basis(A, previous, width))
+        end
+        U, S, Vt, _ = svd_trunc!(M * Q; trunc=strategy)
+        Vt = Vt * Q'
+        discarded = max(0, 1 - norm(S)^2 / weight)
+        if discarded <= tolerance || abs(discarded - projection_tol) <= tolerance
+            discarded = norm(M - U*S*Vt)^2 / weight
+        end
+        if discarded <= projection_tol
+            return U, S, Vt, (used_qr=true, projection_error=discarded, target_met=true)
+        end
+    end
+    U, S, Vt, _ = svd_trunc!(copy(M); trunc=strategy)
+    discarded = max(0, 1 - norm(S)^2 / weight)
+    if discarded <= tolerance || abs(discarded - projection_tol) <= tolerance
+        discarded = norm(M - U*S*Vt)^2 / weight
+    end
+    return U, S, Vt, (used_qr=false, projection_error=discarded, target_met=discarded <= projection_tol)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -597,20 +708,144 @@ end
 #
 # The single-site right transfer is T_i(ρ)[a, b] = Σ_{s, c, d} Γ_i[a, s, c]
 # ρ[c, d] conj(Γ_i[b, s, d]).
-function _apply_transfer_unit_cell(ψ::iMPS, ρ::AbstractTensorMap; dir::Symbol)
-    n = ψ.n
-    out = ρ
-    indices = dir === :r ? (n:-1:1) : (1:n)
-    for i in indices
-        Γ = ψ.Γ[i]
-        if dir === :r
-            @tensor out_new[a; b] := Γ[a, s, c] * out[c; d] * conj(Γ[b, s, d])
-        else
-            @tensor out_new[a; b] := conj(Γ[c, s, a]) * out[c; d] * Γ[d, s, b]
-        end
-        out = out_new
+function _apply_site_transfer(Γ, ρ, dir)
+    if dir === :r
+        @tensor out[a; b] := Γ[a, s, c] * ρ[c; d] * conj(Γ[b, s, d])
+    else
+        @tensor out[a; b] := conj(Γ[c, s, a]) * ρ[c; d] * Γ[d, s, b]
     end
     return out
+end
+
+function _apply_transfer_unit_cell(ψ::iMPS, ρ::AbstractTensorMap; dir::Symbol, seam::Integer=ψ.n)
+    n = ψ.n
+    out = ρ
+    indices = dir === :r ? (seam:-1:seam-n+1) : (seam+1:seam+n)
+    for i in indices
+        out = _apply_site_transfer(ψ.Γ[mod1(i, n)], out, dir)
+    end
+    return out
+end
+
+_graded_operator_size(λ) = sum(size(blk, 1)^2 for (_, blk) in blocks(λ))
+
+function _smallest_graded_seam(ψ)
+    seam = ψ.n
+    best = _graded_operator_size(ψ.λ[seam])
+    for i in 1:ψ.n-1
+        cost = _graded_operator_size(ψ.λ[i])
+        if cost < best
+            seam, best = i, cost
+        end
+    end
+    return seam
+end
+
+function _normalized_graded_environment(ρ)
+    weight = real(tr(ρ))
+    isfinite(weight) && weight > 0 ||
+        throw(ArgumentError("invalid symmetric transfer environment"))
+    return (ρ + ρ') / (2 * weight), weight
+end
+
+function _full_graded_roots(ρ, bond, dir; invert::Bool=false)
+    root = similar(ρ)
+    inverse = invert ? similar(ρ) : nothing
+    for (sector, entries) in blocks(ρ)
+        F = eigen(Hermitian(Matrix(entries)))
+        threshold = eps(eltype(F.values)) * max(1, norm(entries))
+        minimum(F.values) > threshold || throw(ArgumentError(
+            "symmetric restore_canonical!: numerically singular $dir environment on bond $bond, sector $sector"))
+        scales = sqrt.(F.values)
+        copyto!(block(root, sector), F.vectors * Diagonal(scales) * F.vectors')
+        if invert
+            copyto!(block(inverse, sector), F.vectors * Diagonal(inv.(scales)) * F.vectors')
+        end
+    end
+    return root, inverse
+end
+
+"""
+    restore_canonical!(ψ::SymmetricIMPS; method=:gram, tol=nothing, maxiter=nothing,
+                       noninjective=:ignore)
+
+Restore a TensorKit-backed injective iMPS to Schmidt canonical form at
+fixed graded bond spaces. Normalize the state per cell. Both transfer
+environments and gauges are obtained by sitewise contractions. Requires
+full numerical Schmidt support in the stored sectors.
+`noninjective=:warn` and `:error` check the neutral transfer spectrum on
+small graded bonds. The default assumes a unique physical fixed point.
+"""
+function restore_canonical!(ψ::SymmetricIMPS; method::Symbol=:gram,
+                            tol::Union{Nothing,Real}=nothing, maxiter::Union{Nothing,Integer}=nothing,
+                            noninjective::Symbol=:ignore)
+    method === :gram || throw(ArgumentError("symmetric restore_canonical! supports method=:gram"))
+    tol = isnothing(tol) ? 1e-12 : tol
+    maxiter = isnothing(maxiter) ? 200 : maxiter
+    isfinite(tol) && tol > 0 || throw(ArgumentError("tol must be finite and positive"))
+    maxiter > 0 || throw(ArgumentError("maxiter must be positive"))
+    threshold = max(100tol, 100 * eps(Float64))
+
+    # Factor both sweeps around the smallest graded bond.
+    seam = _smallest_graded_seam(ψ)
+    order = [seam+1:ψ.n; 1:seam]
+    trial = iMPS(ψ.Γ[order], ψ.λ[order], ψ.n)
+    λr, R = _dominant_fixed_point(trial; dir=:r, tol, maxiter)
+    λl, L = _dominant_fixed_point(trial; dir=:l, tol, maxiter)
+    isfinite(λr) && isfinite(λl) && λr > 0 && λl > 0 ||
+        throw(ArgumentError("invalid symmetric transfer eigenvalues"))
+    abs(λr - λl) <= threshold * max(λr, λl) ||
+        throw(ArgumentError("inconsistent symmetric left and right transfer eigenvalues"))
+    _diagnose_graded_transfer(trial, R, trial.n, λr, tol, noninjective)
+    for (rate, ρ, dir) in ((λr, R, :r), (λl, L, :l))
+        err = norm(_apply_transfer_unit_cell(trial, ρ; dir) - rate * ρ)
+        err <= threshold * rate * norm(ρ) ||
+            throw(ArgumentError("inaccurate symmetric $dir transfer fixed point"))
+    end
+
+    n = ψ.n
+    rights = Vector{typeof(R)}(undef, n)
+    scales = Vector{typeof(real(λr))}(undef, n)
+    rights[n] = R
+    for i in n:-1:1
+        previous, scales[i] = _normalized_graded_environment(_apply_site_transfer(trial.Γ[i], rights[i], :r))
+        i > 1 && (rights[i-1] = previous)
+    end
+    left = L
+    gauges = similar(rights)
+    inverses = similar(rights)
+    spectra = similar(ψ.λ)
+    for i in 1:n
+        left = i == n ? L : first(_normalized_graded_environment(_apply_site_transfer(trial.Γ[i], left, :l)))
+        X, Xinv = _full_graded_roots(rights[i], order[i], :right; invert=true)
+        Y, _ = _full_graded_roots(left, order[i], :left)
+        U, S, _ = svd_compact(X * Y)
+        domain(S) == domain(ψ.λ[order[i]]) || throw(ArgumentError(
+            "symmetric restore_canonical! would change the graded space on bond $(order[i])"))
+        spectra[i] = S / norm(S)
+        gauges[i] = X * U
+        inverses[i] = U' * Xinv
+    end
+
+    tensors = similar(ψ.Γ)
+    for i in 1:n
+        previous = mod1(i-1, n)
+        A, H, G = trial.Γ[i], inverses[previous], gauges[i]
+        @tensor B[a,s;c] := H[a;b] * A[b,s;d] * G[d;c]
+        tensors[i] = B / sqrt(scales[i])
+        boundary = id(eltype(B), domain(B)[1])
+        target = id(eltype(B), codomain(B)[1])
+        norm(_apply_site_transfer(tensors[i], boundary, :r) - target) <= threshold * norm(target) ||
+            error("symmetric restore_canonical!: right isometry check failed at site $(order[i])")
+        density = spectra[previous] * spectra[previous]
+        expected = spectra[i] * spectra[i]
+        norm(_apply_site_transfer(tensors[i], density, :l) - expected) <= threshold * norm(expected) ||
+            error("symmetric restore_canonical!: Schmidt environment check failed at site $(order[i])")
+    end
+    _validate_iMPS_bonds(tensors, spectra, n)
+    ψ.Γ[order] = tensors
+    ψ.λ[order] = spectra
+    return ψ
 end
 
 # Dominant fixed point of the unit-cell transfer map. Returns
@@ -627,17 +862,30 @@ end
 # whose blockwise spectrum is closest to PSD.
 function _dominant_fixed_point(ψ::iMPS; dir::Symbol,
                                 tol::Real, maxiter::Integer,
-                                noconverge::Symbol=:error)
-    n = ψ.n
-    Vbond = if dir === :r
-        # Right fixed point lives on the right virtual leg of Γ[n].
-        domain(ψ.Γ[n])[1]
-    else
-        # Left fixed point lives on the left virtual leg of Γ[1].
-        codomain(ψ.Γ[1])[1]
-    end
+                                noconverge::Symbol=:error, seam::Integer=ψ.n)
+    λ = ψ.λ[seam]
+    Vbond = domain(λ)[1]
     ρ0 = id(ComplexF64, Vbond)
-    matvec = ρ -> _apply_transfer_unit_cell(ψ, ρ; dir=dir)
+    if dir === :l
+        values = Iterators.flatten(b.diag for (_, b) in blocks(λ))
+        top = _graded_diagonal_max(λ)
+        if all(v -> v > sqrt(eps(typeof(v))) * top, values)
+            # A successful fixed-space update leaves λ² as the left
+            # environment. A strictly positive seed also sees the Perron
+            # sector even when stale.
+            ρ0 = TensorMap(λ * λ) * (1.0 + 0im)
+        end
+    end
+    ρ0 = (ρ0 / real(tr(ρ0)))
+    matvec = ρ -> _apply_transfer_unit_cell(ψ, ρ; dir, seam)
+    # Canonical states can supply the solution immediately. Check the
+    # full relative residual before skipping an iterative solve.
+    applied = matvec(ρ0)
+    rate = real(tr(applied))
+    threshold = max(eps(Float64), min(tol, 20eps(Float64)))
+    if isfinite(rate) && rate > 0 && norm(applied - rate * ρ0) <= threshold * rate * norm(ρ0)
+        return rate, ρ0
+    end
     # Request a handful of eigenvalues so we can pick the genuine PSD one in
     # case of ±λ_max degeneracy.
     howmany = min(4, dim(Vbond))
@@ -699,6 +947,49 @@ function _dominant_fixed_point(ψ::iMPS; dir::Symbol,
     return λ_max, ρ_dom
 end
 
+# A solve started away from the physical split still needs environments on
+# bond n. Rescale each factor to trace 1, as in the original wraparound solve.
+function _fixed_point_at_wrap(ψ, ρ, seam, dir)
+    seam == ψ.n && return ρ
+    indices = dir === :r ? (seam:-1:1) : (seam+1:ψ.n)
+    for i in indices
+        ρ, _ = _normalized_graded_environment(_apply_site_transfer(ψ.Γ[i], ρ, dir))
+    end
+    return ρ
+end
+
+function _diagnose_graded_transfer(ψ, prototype, seam, rate, tol, policy)
+    policy === :ignore && return nothing
+    policy in (:warn, :error) || throw(ArgumentError("noninjective must be :ignore, :warn or :error"))
+    d = _graded_operator_size(ψ.λ[seam])
+    d <= 1 && return nothing
+    if d > 32
+        msg = "the exact graded degeneracy check requires a neutral operator space of dimension at most 32 (got $d)"
+    else
+        transfer = Matrix{eltype(prototype)}(undef, d, d)
+        probe = zero(prototype)
+        col = 1
+        for (_, entries) in blocks(probe), j in eachindex(entries)
+            entries[j] = 1
+            y = _apply_transfer_unit_cell(ψ, probe; dir=:r, seam)
+            row = 1
+            for (_, block_y) in blocks(y), value in block_y
+                transfer[row, col] = value / rate
+                row += 1
+            end
+            entries[j] = 0
+            col += 1
+        end
+        values = LinearAlgebra.eigvals!(transfer)
+        slack = max(10tol, 100eps(Float64))
+        count(v -> abs(abs(v) - 1) <= slack, values) <= 1 && return nothing
+        msg = "symmetric transfer has multiple peripheral eigenvalues in its neutral sector"
+    end
+    policy === :error && throw(ArgumentError(msg))
+    @warn msg
+    return nothing
+end
+
 # Compute the sum of the magnitudes of negative eigenvalues across all blocks
 # of a Hermitian TensorMap. Zero (within tolerance) means PSD; large values
 # mean the operator is sign-indefinite.
@@ -756,16 +1047,18 @@ end
 """
     canonical!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap};
                maxdim=MAXDIM, cutoff=SVDTOL, renormalize=true,
-               tol=1e-12, maxiter=200)
+               tol=1e-12, maxiter=200, noconverge=:error, noninjective=:ignore)
 
 Bring a symmetric (TensorKit-backed) `iMPS` to Schmidt canonical form using
 TensorKit primitives.
 
 Algorithm (injective setting):
 
-1. Solve for the dominant right and left fixed points `R`, `L` of the
-   unit-cell transfer map (T_R from the stored tensors B = Γ λ; T_L is its
-   adjoint chain). KrylovKit's `eigsolve` is used as a matrix-free solver.
+1. Solve for the dominant right and left fixed points of the unit-cell
+   transfer map at the bond with the smallest neutral operator space. The
+   identity and stored Schmidt environments are accepted if their relative
+   residual passes. Otherwise use a matrix-free Krylov solve. Propagate the
+   environments to the original wraparound bond before truncating.
 2. Take Hermitian square roots: `X = sqrt(R)`, `Y = sqrt(L)`.
 3. SVD: `X · Y = U · S · V'`. The canonical Schmidt spectrum on the
    wraparound bond is `Λ = S` (optionally renormalised so `sum(Λ²) = 1`).
@@ -774,17 +1067,13 @@ Algorithm (injective setting):
      `B_new = U' · X⁻¹ · B · X · U` and `ψ.λ[1] = Λ`.
    - For `n > 1`, the gauge splits between the two boundary sites:
      `B_n_new = B_n · X · U`, `B_1_new = U' · X⁻¹ · B_1`. The internal bonds
-     are then re-canonicalised by an SVD chain on the grouped unit cell so
+     are then re-canonicalised by a sitewise LQ and SVD sweep so
      that each individual `B_i` satisfies the right-canonical condition
      `Σ_s B_i B_i' = I`.
 
-Assumptions: the unit cell is *injective* — the dominant eigenvalue of the
-transfer map is unique. For non-injective inputs (e.g. states with broken
-translation symmetry within the unit cell, or transfer maps with
-nearly-degenerate paired dominant eigenvalues), this routine refuses to
-mutate the state and raises `ArgumentError` with diagnostics on the
-mismatched left/right transfer eigenvalues. A future release will add
-non-injective / multi-block canonical form.
+The routine assumes an injective unit cell. Left and right eigenvalues
+must agree. That equality holds for adjoint transfers in general, so
+unique peripheral transfer eigenvalues need a separate check.
 
 Keyword arguments:
 - `maxdim::Integer = MAXDIM` — Hard rank cap on each bond.
@@ -801,6 +1090,9 @@ Keyword arguments:
   eigsolve fails to converge: `:error` raises (default), `:warn` emits
   a warning and proceeds with the leading Ritz vector, `:ignore`
   proceeds silently.
+- `noninjective::Symbol = :ignore` — Set `:warn` or `:error` to inspect
+  multiplicity in the neutral peripheral transfer spectrum at a small bond.
+  This diagnostic covers neutral operator spaces of dimension at most 32.
 """
 function canonical!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap};
                     maxdim::Integer=InfiniteTEBD.MAXDIM,
@@ -808,35 +1100,30 @@ function canonical!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap};
                     renormalize::Bool=true,
                     tol::Real=1e-12,
                     maxiter::Integer=200,
-                    noconverge::Symbol=:error)
+                    noconverge::Symbol=:error,
+                    noninjective::Symbol=:ignore)
+    _validate_truncation_args(maxdim, 1, 0.0, cutoff)
+    isfinite(tol) && tol > 0 || throw(ArgumentError("tol must be finite and positive"))
+    maxiter > 0 || throw(ArgumentError("maxiter must be positive"))
+    noconverge in (:error, :warn, :ignore) ||
+        throw(ArgumentError("noconverge must be :error, :warn or :ignore"))
     n = ψ.n
-    # 1. Dominant right and left fixed points of the unit-cell transfer map.
-    λ_r, R = _dominant_fixed_point(ψ; dir=:r, tol=tol, maxiter=maxiter, noconverge=noconverge)
-    λ_l, L = _dominant_fixed_point(ψ; dir=:l, tol=tol, maxiter=maxiter, noconverge=noconverge)
+    seam = _smallest_graded_seam(ψ)
+    λ_r, R = _dominant_fixed_point(ψ; dir=:r, tol, maxiter, noconverge, seam)
+    λ_l, L = _dominant_fixed_point(ψ; dir=:l, tol, maxiter, noconverge, seam)
+    all(s -> isfinite(s) && s > 0, (λ_r, λ_l)) ||
+        throw(ArgumentError("canonical!: transfer rate must be finite and positive"))
+    abs(λ_r - λ_l) <= sqrt(eps(Float64)) * max(λ_r, λ_l) * 100 ||
+        throw(ArgumentError("canonical!: inconsistent left/right transfer rates ($λ_l, $λ_r)"))
+    λ_max = (λ_r + λ_l) / 2
+    _diagnose_graded_transfer(ψ, R, seam, λ_max, tol, noninjective)
+    R = _fixed_point_at_wrap(ψ, R, seam, :r)
+    L = _fixed_point_at_wrap(ψ, L, seam, :l)
 
-    # The dominant transfer eigenvalue should match in both directions for an
-    # injective state (up to numerical noise). Take the average for a more
-    # robust per-site scaling factor.
-
-    # Injective states have λ_r ≈ λ_l. A meaningful asymmetry signals non-injectivity
-    # (e.g. block-diagonal transfer with paired dominant eigenvalues, or a state
-    # with broken translation symmetry within the unit cell). Surface this rather
-    # than silently averaging and proceeding.
-    λ_scale = max(abs(λ_r), abs(λ_l), 1.0)
-    if abs(λ_r - λ_l) > sqrt(eps(Float64)) * λ_scale * 100
-        throw(ArgumentError(
-            "canonical!: asymmetric transfer eigenvalues (λ_r=$(λ_r), λ_l=$(λ_l)). " *
-            "The v1 symmetric canonical! only handles injective states; the input " *
-            "is likely non-injective (e.g. block-diagonal transfer with paired " *
-            "dominant eigenvalues, or broken translation symmetry within the unit " *
-            "cell). For this v1 release the routine refuses to proceed rather than " *
-            "silently produce a corrupted state. A future release will add " *
-            "non-injective / multi-block canonical form. Workarounds: (a) seed the " *
-            "random state differently; (b) construct the state directly in a fixed " *
-            "flux sector via product_iMPS; (c) bypass canonicalisation if you are " *
-            "OK with a non-canonical state for diagnostic purposes."))
-    end
-    λ_max = (real(λ_r) + real(λ_l)) / 2
+    # Only commit after every local factorization and the resulting bond
+    # spaces have been validated. The trial uses replacement, not in-place
+    # writes to the input TensorMaps.
+    trial = iMPS(copy(ψ.Γ), copy(ψ.λ), n)
 
     # Rescale each Γ by λ_max^(1/(2n)) so the new unit-cell transfer eigenvalue
     # becomes 1. After this, `Σ_s B_new · B_new' = I` will hold for the
@@ -844,7 +1131,7 @@ function canonical!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap};
     if λ_max > 0
         scale = λ_max^(1 / (2 * n))
         for i in 1:n
-            ψ.Γ[i] = ψ.Γ[i] / scale
+            trial.Γ[i] = trial.Γ[i] / scale
         end
     end
 
@@ -859,16 +1146,16 @@ function canonical!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap};
     M = X * Y
     U, Λ, _Vt, _info = svd_trunc!(M;
         trunc=truncrank(Int(maxdim)) & trunctol(; atol=Float64(cutoff)))
-    if renormalize
-        nrm = norm(Λ)
-        if !iszero(nrm)
-            Λ = Λ / nrm
-        end
-    end
+    nrm = norm(Λ)
+    isfinite(nrm) && nrm > 0 || throw(ArgumentError("no finite nonzero Schmidt weight remains on the seam"))
+    renormalize && (Λ = Λ / nrm)
 
     # 4. Apply the wraparound gauge G = X·U and split for multi-site cells.
-    _absorb_gauge!(ψ, X, Xinv, U, Λ;
+    _absorb_gauge!(trial, X, Xinv, U, Λ;
                    maxdim=maxdim, cutoff=cutoff, renormalize=renormalize)
+    _validate_iMPS_bonds(trial.Γ, trial.λ, n)
+    ψ.Γ .= trial.Γ
+    ψ.λ .= trial.λ
     return ψ
 end
 
@@ -907,11 +1194,48 @@ function _absorb_gauge!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap},
     ψ.Γ[n] = Γ_last_new
     ψ.λ[n] = Λ
 
-    # Recanonicalise internal bonds by a left-to-right SVD chain over the
-    # grouped unit cell. With Λ already left-mul'd into ψ.Γ[1], the SVD chain
+    # Recanonicalise internal bonds by a left-to-right SVD sweep.
+    # With Λ already left-mul'd into ψ.Γ[1], the SVD chain
     # starts with `λi = Λ` and produces individually right-canonical B_i's
     # whose left-Schmidt factor matches the wraparound Λ.
     _split_unit_cell!(ψ, Λ; maxdim=maxdim, cutoff=cutoff, renormalize=renormalize)
+    return ψ
+end
+
+function _split_unit_cell!(ψ::SymmetricIMPS, Λwrap::DiagonalTensorMap;
+                           maxdim::Integer, cutoff::Real, renormalize::Bool)
+    n = ψ.n
+    n > 1 || return ψ
+
+    # Right-isometrize the tail without truncation. Repartition moves the
+    # physical leg to the domain with TensorKit's dual-space convention.
+    carry, Q = right_orth(permute(ψ.Γ[n], ((1,), (2, 3))))
+    tails = Vector{typeof(Q)}(undef, n)
+    tails[n] = Q
+    for i in n-1:-1:2
+        carry, tails[i] = right_orth(permute(ψ.Γ[i] * carry, ((1,), (2, 3))))
+    end
+
+    # Every remaining tail is a row isometry. Replacing M*Q by M preserves
+    # the nonzero cut spectrum, including the sector labels.
+    M = ψ.Γ[1] * carry
+    λ = Λwrap
+    strategy = truncrank(Int(maxdim)) & trunctol(; atol=Float64(cutoff))
+    for i in 1:n-1
+        A, S, Vt, _ = svd_trunc!(M; trunc=strategy)
+        nrm = norm(S)
+        isfinite(nrm) && nrm > 0 || throw(ArgumentError("no finite nonzero Schmidt weight remains on bond $i"))
+        renormalize && (S = S / nrm)
+        ψ.Γ[i] = _absorb_diag_right(_absorb_diag_left(A, _diag_inverse(λ; cutoff)), S)
+        ψ.λ[i] = S
+        tail = Vt * tails[i+1]
+        if i == n - 1
+            ψ.Γ[n] = _vt_to_site_tensor(tail)
+        else
+            M = _vt_to_site_tensor(S * tail)
+        end
+        λ = S
+    end
     return ψ
 end
 
@@ -926,9 +1250,9 @@ end
 # tensor analogous to the wraparound starting state). The final remaining
 # tensor is the rightmost site's stored B (it is already right-canonical as an
 # SVD isometry).
-function _split_unit_cell!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap},
-                           Λwrap::DiagonalTensorMap;
-                           maxdim::Integer, cutoff::Real, renormalize::Bool)
+# Small-cell reference used by the streaming-split regression tests.
+function _split_unit_cell_grouped!(ψ::SymmetricIMPS, Λwrap::DiagonalTensorMap;
+                                   maxdim::Integer, cutoff::Real, renormalize::Bool)
     n = ψ.n
     n > 1 || return ψ
 
@@ -1047,23 +1371,30 @@ function _absorb_diag_left_on_codomain(Vt::AbstractTensorMap, λ::AbstractTensor
     return λ * Vt
 end
 
-# Helper: compute the pseudo-inverse of a DiagonalTensorMap (sector-wise).
-# The threshold for zeroing small entries is `cutoff * max(|entries|)` so that
-# the user-supplied truncation cutoff is respected (rather than a hardcoded
-# sqrt(eps) ≈ 1.5e-8 that silently discards modes the user asked to keep).
-function _diag_inverse(λ::DiagonalTensorMap; cutoff::Real=InfiniteTEBD.SVDTOL)
-    out = similar(λ)
-    # Compute the global max absolute value across all blocks for the threshold.
+function _graded_diagonal_max(λ::DiagonalTensorMap)
     global_max = 0.0
-    for (_, blk) in blocks(λ)
-        for i in 1:size(blk, 1)
-            global_max = max(global_max, abs(blk[i, i]))
+    for (_, entries) in blocks(λ)
+        for v in entries.diag
+            global_max = max(global_max, abs(v))
         end
     end
+    return global_max
+end
+
+# Choose the inverse-free update whenever a positive Schmidt value is
+# ill-conditioned or would be zeroed by _diag_inverse.
+function _graded_reconstruction_threshold(λ::DiagonalTensorMap, cutoff)
+    top = _graded_diagonal_max(λ)
+    return max(top * sqrt(eps(eltype(λ))), max(cutoff, eps(Float64)) * max(top, 1))
+end
+
+# Sectorwise pseudoinverse with the configured cutoff and a roundoff floor.
+function _diag_inverse(λ::DiagonalTensorMap; cutoff::Real=InfiniteTEBD.SVDTOL)
+    out = similar(λ)
     # Safety floor at eps(Float64) prevents inverting entries that are pure
     # numerical noise (Schmidt values can have machine-precision-scale entries
     # that should be treated as zero even when the user requests a very small cutoff).
-    tol = max(Float64(cutoff), eps(Float64)) * max(global_max, 1.0)
+    tol = max(Float64(cutoff), eps(Float64)) * max(_graded_diagonal_max(λ), 1.0)
     for (sector, blk) in blocks(λ)
         out_blk = block(out, sector)
         for i in 1:size(blk, 1)
@@ -1089,7 +1420,8 @@ import InfiniteTEBD: applygate!
 
 """
     applygate!(ψ::SymmetricIMPS, G::AbstractTensorMap, i::Integer, j::Integer;
-               maxdim=MAXDIM, cutoff=SVDTOL, renormalize=true, kwargs...)
+               maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL,
+               renormalize=true, recanonicalize=false, gauge=nothing, return_stats=false)
 
 Apply a two-site gate `G` to neighbouring sites `i` and `j = mod1(i+1, ψ.n)`
 of a symmetric infinite MPS in place. `G` must be a TensorMap with codomain
@@ -1098,25 +1430,23 @@ unit cell must contain at least two sites (`ψ.n ≥ 2`): on a single-site cell
 the two gate legs would alias the same tensor, so the call throws an
 `ArgumentError` and leaves the state untouched.
 
-Algorithm:
-1. Group: `B[a,s,t;c] = Γi[a,s;m] * Γj[m,t;c]`.
-2. Apply gate: `B'[a,s,t;c] = G[s,t;u,v] * B[a,u,v;c]`.
-3. SVD `B'` on the `(a,s) | (t,c)` cut via `_symmetric_tsvd`.
-4. Store `U` as `ψ.Γ[i]`, `S * Vt` as `ψ.Γ[j]`, `S` as `ψ.λ[i]`.
+The SVD acts on the gated two-site tensor weighted by the incoming Schmidt
+values. The result is stored as `λ_left⁻¹ * U * S`, `Vt`, and bond spectrum
+`S`. For a poorly conditioned incoming bond, reconstruct the left tensor
+directly from the unweighted gated block and the retained right vectors.
 
-Only nearest-neighbour gates (`j = mod1(i+1, ψ.n)`) are supported.
-The truncation kwargs match the dense path's contract: `cutoff` and
-`svd_min` are aliases for the singular-value floor (`_resolve_svd_min`
-forbids passing both); `mindim`/`truncerr` are accepted only at their
-default values (the v1 symmetric SVD primitive does not yet honour
-either), and `return_stats=true` is rejected because no stats are
-collected. Unknown kwargs raise `MethodError`.
+For Abelian bonds, `truncerr > 0` selects a global rank from the total
+discarded fraction of squared singular values. `maxdim` and `mindim`
+count dimensions across all sectors. `svd_min` (alias `cutoff`) sets
+an absolute floor, subject to `mindim` when using discarded-weight
+controls. The default fixed-cap path applies the floor directly.
+`return_stats=true` returns `(ψ, stats)` with the same cut diagnostics as
+the dense method.
 
-For wrap-around gates (gate spans the seam between site n and site 1), the
-default `recanonicalize=false` skips re-canonicalisation — appropriate for
-unitary real-time evolution, where the SVD chain preserves canonical form.
-For non-unitary (imaginary-time) evolution, pass `recanonicalize=true` so the
-state is re-canonicalised after each wrap gate and observables stay accurate.
+`recanonicalize=true` runs the existing global canonicalization after a
+wrap-around gate, possibly truncating further. The reported statistics
+cover the local gate's bond cut. Use `gauge=:gram` with `renormalize=true`
+for a fixed-space gauge restoration after any individual gate.
 """
 function applygate!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap},
                     G::AbstractTensorMap, i::Integer, j::Integer;
@@ -1127,27 +1457,11 @@ function applygate!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap},
                     svd_min::Union{Nothing,Real}=nothing,
                     renormalize::Bool=true,
                     recanonicalize::Bool=false,
+                    gauge::Union{Nothing,Symbol}=nothing,
                     return_stats::Bool=false)
-    # The dense path returns `(ψ, stats)` when `return_stats=true`; the
-    # symmetric path does not yet collect truncation diagnostics, so the
-    # base `_evolve_gate_sequence!` would silently destructure ψ and crash.
-    # Surface the limitation up front instead.
-    return_stats && throw(ArgumentError(
-        "v1 symmetric applygate! does not yet collect truncation stats; " *
-        "drop `return_stats=true` or use the dense backend."))
-    # Mirror the dense applygate! validation: alias rule on cutoff/svd_min,
-    # finite/non-negative truncation knobs.
     effective_cutoff = _resolve_svd_min(svd_min, cutoff)
     _validate_truncation_args(maxdim, mindim, truncerr, effective_cutoff)
-    # The v1 symmetric SVD primitive does not yet honour these knobs; reject
-    # non-default values explicitly so callers don't get silently wrong
-    # truncation behaviour.
-    mindim == 1 || throw(ArgumentError(
-        "v1 symmetric applygate! does not yet honour mindim > 1 " *
-        "(got mindim=$mindim); pass mindim=1 or use the dense backend."))
-    iszero(truncerr) || throw(ArgumentError(
-        "v1 symmetric applygate! does not yet honour truncerr > 0 " *
-        "(got truncerr=$truncerr); pass truncerr=0 or use the dense backend."))
+    _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
     # Two-site gates need two distinct sites. On an n=1 unit cell the periodic
     # normalization maps (i, j) = (1, 2) to (1, 1), the nearest-neighbour
     # validator below would accept it (mod1(2, 1) == 1), and the two halves of
@@ -1164,72 +1478,62 @@ function applygate!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap},
     # Match the dense applygate! convention: interpret raw `i, j` periodically
     # so callers can pass any integer label, then verify the pair is a
     # nearest-neighbour cut.
-    i, j = mod(i - 1, ψ.n) + 1, mod(j - 1, ψ.n) + 1
+    i, j = InfiniteTEBD._normalize_gate_sites(ψ, i, j)
     j == mod1(i + 1, ψ.n) || throw(ArgumentError(
         "v1 symmetric applygate! supports nearest-neighbour two-site gates only " *
         "(got i=$i, j=$j on n=$(ψ.n) after periodic normalization)"))
 
-    n   = ψ.n
-    Γi  = ψ.Γ[i]
-    Γj  = ψ.Γ[j]
-    λL  = ψ.λ[mod1(i - 1, n)]   # Schmidt values to the LEFT of site i
-    λLi = _diag_inverse(λL; cutoff=effective_cutoff)  # pseudo-inverse, safe for tiny entries
-
-    # iTEBD canonical convention (matching the dense tensor_decomp! convention):
-    #   stored Γ[k] = λ[k-1]^{-1} · A[k] · λ[k]
-    # so the physical B-tensor is λ[k-1] · Γ[k] = A[k] · λ[k].
-    #
-    # Two-site B-block: λL · Γi · Γj = A[i] · A[j] · λ[j]
-    # (λ[i] factors cancel: Γi has λ[i] absorbed, Γj has λ[i]^{-1} on the left)
-    #
-    # Gate application follows the dense tensor_applygate! flow:
-    #   1. Absorb λL into Γi to form B[i] = λL · Γi
-    #   2. Group: B = B[i] · Γj = λL · Γi · Γj  (the correct two-site state)
-    #   3. Apply gate: B′ = G · B
-    #   4. SVD: B′ = U · S · Vt
-    #   5. Store Γ[i]_new = λL^{-1} · U · S,  λ[i]_new = S,  Γ[j]_new = Vt
-
-    # Step 1+2: form gated two-site block with λL absorbed.
-    @tensor Bi[a, s; m] := λL[a; a′] * Γi[a′, s; m]
-    @tensor B[a, s, t; c] := Bi[a, s; m] * Γj[m, t; c]
-
-    # Step 3: apply the gate.
-    @tensor B′[a, s, t; c] := G[s, t; u, v] * B[a, u, v; c]
-
-    # Step 4: SVD with (V_l, P1) | (P2, V_r) cut.
-    U, S, Vt, _ = _symmetric_tsvd(B′; maxdim=maxdim, cutoff=effective_cutoff)
-
-    if renormalize
-        nrm = norm(S)
-        nrm > 0 && (S = S / nrm)
+    Γi, Γj = ψ.Γ[i], ψ.Γ[j]
+    λL = ψ.λ[mod1(i - 1, ψ.n)]
+    weight_cutoff = _graded_reconstruction_threshold(λL, effective_cutoff)
+    values = Iterators.flatten(entries.diag for (_, entries) in blocks(λL))
+    inverse_free = any(v -> 0 < v <= weight_cutoff, values)
+    Ai = inverse_free ? Γi : _absorb_diag_left(Γi, λL)
+    @tensor B[a, s, t; c] := Ai[a, s; m] * Γj[m, t; c]
+    @tensor C[a, s, t; c] := G[s, t; u, v] * B[a, u, v; c]
+    if inverse_free
+        @tensor weighted[a, s, t; c] := λL[a; b] * C[b, s, t; c]
+    else
+        weighted = C
+    end
+    U, S, Vt, info = _symmetric_gate_cut(weighted; maxdim, mindim, truncerr,
+        cutoff=effective_cutoff, return_stats)
+    nrm = norm(S)
+    isfinite(nrm) && nrm > 0 || throw(ArgumentError(
+        "symmetric gate retains no finite nonzero Schmidt weight"))
+    renormalize && (S = S / nrm)
+    if inverse_free
+        # The left-weighted cut is M = λL*C, so U*S = M*Vt'.
+        # Form C*Vt' without inverting tiny nonzero weights.
+        Γi_new = permute(C, ((1, 2), (3, 4))) * Vt'
+        if any(iszero, values)
+            support = similar(λL)
+            for (sector, entries) in blocks(λL)
+                block(support, sector).diag .= .!iszero.(entries.diag)
+            end
+            Γi_new = _absorb_diag_left(Γi_new, support)
+        end
+        renormalize && (Γi_new = Γi_new / nrm)
+    else
+        Γi_new = _absorb_diag_left(U * S, _diag_inverse(λL; cutoff=effective_cutoff))
     end
 
-    # Step 5: restore canonical storage.
-    #   Γ[i]_new = λL^{-1} · U · S
-    #     λ[i-1]_new = λL (left bond of i is unchanged by the gate)
-    #     So: λ[i-1]_new · Γ[i]_new = λL · λL^{-1} · U · S = U · S = B[i]_new ✓
-    #   Γ[j]_new = Vt  (raw right-isometry, no extra Schmidt absorbed)
-    #     λ[i]_new = S  (the new left bond of j)
-    #     So: λ[i]_new · Γ[j]_new = S · Vt = B[j]_new ✓
-    #     Note: energy_density uses λ[j-1]·Γ[j] = S · Vt, which equals the
-    #     gated right block.  The bond λ[j] (right of j) is NOT updated.
-    UdS = U * S
-    @tensor Γi_new[a, s; m] := λLi[a; a′] * UdS[a′, s; m]
-    ψ.Γ[i] = Γi_new
-    ψ.λ[i] = S
-    ψ.Γ[j] = _vt_to_site_tensor(Vt)
-
-    # Wrap-around gates: for non-unitary gates (imaginary-time evolution) the
-    # SVD chain restores canonical form locally at sites i,j but the seam to
-    # the rest of the cell drifts. Re-canonicalise unless the user opts out
-    # (only safe for pure unitary evolution).
-    # Guard: skip re-canonicalisation if any bond space has become empty
-    # (hard truncation can leave a sector with dim 0, making the identity
-    # vector zero-normed and breaking eigsolve).
-    if recanonicalize && j < i && all(k -> dim(domain(ψ.Γ[k])[1]) > 0, 1:ψ.n)
-        canonical!(ψ; maxdim=maxdim, cutoff=effective_cutoff, renormalize=renormalize)
+    recanonicalize = recanonicalize && j < i
+    staged = recanonicalize || !isnothing(gauge)
+    trial = staged ? iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n) : ψ
+    Γj_new = _vt_to_site_tensor(Vt)
+    trial.Γ[i], trial.Γ[j], trial.λ[i] = Γi_new, Γj_new, S
+    recanonicalize && canonical!(trial; maxdim, cutoff=effective_cutoff, renormalize)
+    isnothing(gauge) || restore_canonical!(trial; method=gauge)
+    if staged
+        ψ.Γ .= trial.Γ
+        ψ.λ .= trial.λ
     end
-
+    if return_stats
+        stats = BondStat(i, info.chi_req, info.chi_keep, info.discarded_weight,
+            info.saturated, info.target_met, info.smallest_kept_sv, info.largest_discarded_sv)
+        return ψ, _gate_update_stats(i, j, [stats])
+    end
     return ψ
 end
 

@@ -6,19 +6,72 @@ target bond dimension `χ`, it repeatedly evolves, projects back to `χ`, and
 optionally corrects the energy density so the trajectory does not drift toward
 a featureless low-energy state.
 
-`InfiniteTEBD.jl` exposes three entry points:
-
 | Signature | Real-time gate | Energy correction | Typical use |
 |-----------|----------------|-------------------|-------------|
 | `scarfinder!(ψ, h, dt, χ, N; ...)` | `exp(-1im * dt * h)`, built internally | optional, against `h` | you have only the local density `h` |
 | `scarfinder!(ψ, G, χ, N; ...)` | user-supplied `G` | none | `G` is a prebuilt or Floquet step |
 | `scarfinder!(ψ, G, h, χ, N; ...)` | user-supplied `G` | optional, against `h` | constrained models such as PXP |
+| `scarfinder!(ψ, gates, χ, N; ...)` | ordered `(G, i, j)` updates | none | Floquet circuits and endpoint gates |
+| `scarfinder!(ψ, gates, h, χ, N; ...)` | ordered `(G, i, j)` updates | optional, against `h` | prepared dynamics with independent energy density |
 
 Each iteration has the same shape: real-time evolution at a temporary
 bond dimension `maxdim`, projection back to `χ`, and an optional imaginary-time
 nudge toward a target energy density. After `N` iterations the routine
 optionally scans a short refinement trajectory and keeps the minimum-entanglement
 point along it.
+
+## Second- and fourth-order evolution
+
+The Hamiltonian entry points `scarfinder!` and `scarfinder_step!` accept
+`trotter=:second`, `:fourth`, or `:fourth_opt`. The default `trotter=nothing`
+uses the original sequential sweep. For example, a three-site density on a
+six-site cell can use
+
+```julia
+scarfinder!(ψ, h, dt, χ, N; trotter=:fourth, nstep=10)
+```
+
+`uniform_layers(ψ, h)` places disjoint terms together. For a three-site
+interaction on a six-site cell this gives three layers, including the terms
+that cross the cell boundary. Other cell lengths can require more layers.
+The automatic grouping uses the fewest layers with disjoint supports.
+Use `layers=...` to supply a different commuting decomposition. For example,
+even and odd PXP centres form two commuting layers on an even cell and can
+use `trotter=:fourth_opt`. Explicit layers define the real-time dynamics.
+The density `h` still defines the energy when `target` is supplied.
+
+One iteration completes `nstep` full Trotter steps before compressing. The
+refinement uses the same Trotter formula at `refine_dt`. To choose the order
+of operations yourself, compose the same functions directly:
+
+```julia
+gates = trotter_gates(uniform_layers(ψ, h), dt; trotter=:fourth)
+for _ in 1:N
+    evolve!(ψ, gates, nstep; maxdim)
+    truncate_unitcell!(ψ, χ; cutoff, recanonicalize=true)
+    correction = fix_energy!(ψ, h, χ; target, tol)
+    correction.converged || break
+end
+```
+
+`fix_energy!` reports the measured residual in the state it leaves in `ψ`.
+Omit that call when the calculation has no target energy.
+
+## Prepared gate sequences
+
+Pass a vector or tuple of `(G, i, j)` updates to reuse the same prepared gates
+across ScarFinder iterations. A sequence can mix ordinary matrices, prepared
+[`EndpointGate`](@ref)s, and [`ControlledGate`](@ref)s, just as in [`evolve!`](@ref). Each iteration
+applies the sequence `nstep` times before projection.
+
+```julia
+gates = trotter_gates(layers, dt; trotter=:second)
+refine_gates = trotter_gates(layers, dt / 10; trotter=:second)
+scarfinder!(ψ, gates, χ, N; nstep=10, maxdim, refine_gates)
+```
+
+With an independent energy density, use `scarfinder!(ψ, gates, h, χ, N; target)`.
+Use the corresponding `scarfinder_step!` signature to run one iteration.
 
 ## Which interface should I use?
 
@@ -44,8 +97,7 @@ Pick by the form of the update rule.
   interfaces.
 - `dt` — microscopic real-time step used to build `exp(-1im * dt * h)` in the
   Hamiltonian-based interface.
-- `χ` — bond dimension of the projected manifold. ScarFinder always returns to
-  this size after each iteration.
+- `χ` — upper bound on each bond dimension after projection.
 - `N` — number of ScarFinder iterations.
 
 ## Keyword arguments
@@ -56,6 +108,14 @@ Evolution and projection:
   iteration covers physical time `Δt ≈ nstep * dt`.
 - `maxdim=MAXDIM` — temporary bond dimension during real-time evolution.
 - `cutoff=SVDTOL` — SVD cutoff used during the projection step.
+- `recanonicalize=true` — restore the canonical gauge after a local compression
+  sweep and before measuring energy-fixing trials on large cells. The local gauge
+  solve preserves the retained bond dimensions and assumes an injective state
+  with full numerical support. Use `false` to reproduce the earlier large-cell
+  workflow, where energies and entropies use the spectra from the local updates.
+  Small grouped cells include canonicalization in the projection itself.
+  In the local sweep, wide cuts use an LQ of the right tensor to obtain the
+  same nonzero singular values without forming a fused two-site tensor.
 
 Support widths:
 
@@ -69,9 +129,9 @@ Energy fixing:
 
 - `target=nothing` — target energy density. Leave as `nothing` to disable
   energy correction.
-- `tol=1e-6` — stop the energy-fixing loop once `|E - target| < tol`.
-- `α=0.1` — step-size parameter for the imaginary-time correction.
-- `maxstep=50` — maximum substeps inside one energy-fixing call.
+- `tol=1e-6` — stop the energy-fixing loop once `|E - target| ≤ tol`.
+- `α=0.1` — initial step-size parameter for the imaginary-time correction.
+- `maxstep=50` — maximum trial sweeps inside one energy-fixing call.
 
 Refinement scan (run once after the `N` iterations):
 
@@ -80,6 +140,23 @@ Refinement scan (run once after the `N` iterations):
 - `refine_step=100` — number of trial points used in the scan.
 - `refine_dt=dt/10` — microscopic step used during the scan (Hamiltonian-based
   interface only).
+- `refine_gates=gates` — sequence used for refinement with prepared gate lists.
+
+### Choose a point on a custom trajectory
+
+Use [`minimize_on_trajectory!`](@ref) to control which step and objective the
+scan uses. For example, the step below advances by one prepared gate sequence,
+and the objective is the largest bond entropy in the unit cell.
+
+```julia
+advance!(state) = evolve!(state, gates, 1; maxdim)
+objective(state) = maximum(i -> ent_S(state, i), 1:state.n)
+selection = minimize_on_trajectory!(objective, advance!, ψ, 50)
+```
+
+The scan considers `ψ` at step zero and after each of the 50 trial steps. It
+writes the first minimizing state back into `ψ` and returns its step number
+and measured objective as `selection.step` and `selection.value`.
 
 ## Two time scales: `dt` vs `nstep`
 

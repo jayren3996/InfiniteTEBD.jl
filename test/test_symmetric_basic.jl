@@ -11,11 +11,120 @@ using Random
 # (both are test dependencies and share some exported names like `dim`, `space`).
 using TensorKit: U1Irrep, Z2Irrep, ZNIrrep, Vect, dim, block, blocks, space, id,
                  ComplexSpace, sectortype, sectors, domain, codomain,
-                 AbstractTensorMap, DiagonalTensorMap, ←, ⊗, @tensor
+                 AbstractTensorMap, DiagonalTensorMap, left_orth, ←, ⊗, @tensor
 
 # Symbol-table reach into the loaded extension for internal helpers.
 const _TKExt = Base.get_extension(InfiniteTEBD, :InfiniteTEBDTensorKitExt)
 schmidt_values_from_S(S::DiagonalTensorMap) = _TKExt._flatten_diagonal_blocks(S)
+
+@testset "experimental graded QR cut uses a global rank cap" begin
+    Random.seed!(6018)
+    V = graded_space(:U1, -1=>8, 0=>9, 1=>8)
+    W = graded_space(:U1, -1=>2, 0=>2)
+    seed, _ = left_orth(randn(ComplexF64, V ← W))
+    M = randn(ComplexF64, V ← W) * seed' + 1e-5 * randn(ComplexF64, V ← V)
+    U, S, Vt, info = _TKExt._symmetric_qr_split(M, seed;
+        maxdim=4, projection_tol=1e-6, expansion=2)
+    @test info.used_qr && info.target_met
+    @test dim(domain(S)[1]) == 4
+    @test info.projection_error ≈ norm(M - U*S*Vt)^2/norm(M)^2 atol=1e-14
+    U, S, Vt, info = _TKExt._symmetric_qr_split(M, seed;
+        maxdim=4, projection_tol=0.0, expansion=2)
+    @test !info.used_qr && !info.target_met
+    @test dim(domain(S)[1]) == 4
+    @test info.projection_error ≈ norm(M - U*S*Vt)^2/norm(M)^2 atol=1e-14
+end
+
+@testset "fixed-space symmetric gauge restoration" begin
+    Random.seed!(6017)
+    cases = (
+        (graded_space(:U1, -1=>1, 0=>1, 1=>1),
+         [graded_space(:U1, 0=>2, 1=>1), graded_space(:U1, 0=>1, 1=>1)]),
+        (graded_space(:Z2, 0=>1, 1=>1),
+         [graded_space(:Z2, 0=>2, 1=>1), graded_space(:Z2, 0=>1, 1=>1)]),
+        (graded_space(:U1xZ2, (0,0)=>1, (0,1)=>1, (1,0)=>1, (-1,0)=>1),
+         [graded_space(:U1xZ2, (0,0)=>2, (0,1)=>1, (1,0)=>1),
+          graded_space(:U1xZ2, (0,0)=>1, (0,1)=>1, (1,0)=>1)]),
+    )
+    for (physical, bonds) in cases
+        ψ = _TKExt._rand_symmetric_iMPS(physical, repeat(bonds, 2))
+        original = [convert(Array, B) for B in ψ.Γ]
+        original_spaces = domain.(ψ.λ)
+        @test restore_canonical!(ψ) === ψ
+        @test domain.(ψ.λ) == original_spaces
+        restored = [convert(Array, B) for B in ψ.Γ]
+        @test inner_product(restored) ≈ 1 atol=1e-9
+        @test inner_product(original, restored) / sqrt(inner_product(original)) ≈ 1 atol=1e-9
+        for i in 1:ψ.n
+            @test norm(ψ.λ[i]) ≈ 1 atol=1e-12
+            B = ψ.Γ[i]
+            @test norm(_TKExt._apply_site_transfer(B, id(domain(B)[1]), :r) -
+                       id(codomain(B)[1])) < 1e-8
+            l, r = ψ.λ[mod1(i-1, ψ.n)], ψ.λ[i]
+            @test norm(_TKExt._apply_site_transfer(B, l * l, :l) - r * r) < 1e-8
+        end
+    end
+
+    P, V = graded_space(:U1, -1=>1, 0=>1, 1=>1), graded_space(:U1, 0=>1)
+    long = _TKExt._rand_symmetric_iMPS(P, fill(V, 32))
+    @test restore_canonical!(long) === long
+    @test all(i -> norm(long.λ[i]) ≈ 1, 1:long.n)
+    before = deepcopy(long)
+    @test_throws ArgumentError restore_canonical!(long; method=:qr)
+    @test long.Γ == before.Γ && long.λ == before.λ
+
+    P0, V2 = graded_space(:U1, 0=>1), graded_space(:U1, 0=>2)
+    rank_one = _TKExt._rand_symmetric_iMPS(P0, [V2])
+    entries = block(rank_one.Γ[1], U1Irrep(0))
+    fill!(entries, 0)
+    entries[1,1] = 1
+    before = deepcopy(rank_one)
+    @test_throws ArgumentError restore_canonical!(rank_one)
+    @test rank_one.Γ == before.Γ && rank_one.λ == before.λ
+end
+
+@testset "streaming symmetric split matches the grouped reference" begin
+    Random.seed!(6051)
+    dense_tensors(ψ) = [convert(Array, A) for A in ψ.Γ]
+    spaces = (
+        (graded_space(:U1, -1=>1, 0=>1, 1=>1),
+         [graded_space(:U1, -1=>1, 0=>2, 1=>1), graded_space(:U1, -1=>1, 0=>1, 1=>1)]),
+        (graded_space(:Z2, 0=>1, 1=>2),
+         [graded_space(:Z2, 0=>2, 1=>2), graded_space(:Z2, 0=>2, 1=>1)]),
+        (graded_space(:U1xZ2, (0,0)=>1, (0,1)=>1, (1,0)=>1, (-1,0)=>1),
+         [graded_space(:U1xZ2, (0,0)=>2, (0,1)=>1, (1,0)=>1),
+          graded_space(:U1xZ2, (0,0)=>1, (0,1)=>1, (1,0)=>1)]),
+    )
+    for (physical, bonds) in spaces
+        raw = _TKExt._rand_symmetric_iMPS(physical, repeat(bonds, 2))
+        canonical!(raw; maxdim=4)
+        for renormalize in (true, false), cutoff in (1e-12, 0.1)
+            caps = (; maxdim=2, cutoff, renormalize)
+            a, b = deepcopy(raw), deepcopy(raw)
+            for ψ in (a, b)
+                ψ.Γ[1] = _TKExt._absorb_diag_left(ψ.Γ[1], ψ.λ[end])
+            end
+            _TKExt._split_unit_cell!(a, a.λ[end]; caps...)
+            _TKExt._split_unit_cell_grouped!(b, b.λ[end]; caps...)
+            @test domain.(a.λ) == domain.(b.λ)
+            for i in eachindex(a.λ), (sector, values) in blocks(a.λ[i])
+                @test diag(values) ≈ diag(block(b.λ[i], sector)) atol=1e-10
+            end
+            A, B = dense_tensors(a), dense_tensors(b)
+            @test inner_product(A, B) / sqrt(inner_product(A) * inner_product(B)) ≈ 1 atol=1e-10
+            @test inner_product(A) ≈ inner_product(B) rtol=1e-10
+        end
+    end
+
+    P = graded_space(:U1, -1=>1, 0=>1, 1=>1)
+    V = graded_space(:U1, 0=>1)
+    long = _TKExt._rand_symmetric_iMPS(P, fill(V, 32))
+    @test canonical!(long) === long
+    @test all(i -> norm(long.λ[i]) ≈ 1, 1:long.n)
+    before = deepcopy(long)
+    @test_throws ArgumentError canonical!(long; cutoff=100.0)
+    @test long.Γ == before.Γ && long.λ == before.λ
+end
 
 @testset "graded_space" begin
     P = graded_space(:U1, 0=>2, 1=>1, -1=>1)
@@ -438,14 +547,137 @@ end
     @test isapprox(norm_before[1:n_keep], norm_after[1:n_keep]; atol=1e-9)
 end
 
-@testset "applygate! rejects return_stats=true" begin
-    # Dense applygate! returns (ψ, stats) on return_stats=true; symmetric path
-    # doesn't yet collect them. Silent acceptance would cause the base
-    # `_evolve_gate_sequence!` to destructure ψ itself and crash.
-    ψ = product_iMPS(:U1, [-1, 1], [1, -1])
+@testset "graded gate selects rank from the global weighted spectrum" begin
+    initial = product_iMPS(:Z2, [0, 1], [0, 0, 0, 0])
+    P = codomain(initial.Γ[1])[2]
+    G = id(ComplexF64, P ⊗ P)
+    θ = 0.4
+    block(G, Z2Irrep(0)) .= [cos(θ) -sin(θ); sin(θ) cos(θ)]
+    missing = sin(θ)^2
+
+    ψ = deepcopy(initial)
+    _, report = applygate!(ψ, G, 1, 2; maxdim=1, return_stats=true)
+    stat = only(report.bond_stats)
+    @test report.support == (1, 2)
+    @test stat.bond == 1
+    @test stat.chi_req == 2 && stat.chi_keep == 1 && stat.saturated && !stat.target_met
+    @test stat.discarded_weight ≈ missing
+    @test stat.smallest_kept_sv ≈ cos(θ)
+    @test stat.largest_discarded_sv ≈ sin(θ)
+
+    fast = applygate!(deepcopy(initial), G, 1, 2; maxdim=1)
+    @test convert.(Array, fast.Γ) ≈ convert.(Array, ψ.Γ)
+    @test schmidt_values(fast, 1) ≈ schmidt_values(ψ, 1)
+
+    tied = copy(G)
+    block(tied, Z2Irrep(0)) .= [1.0 -1.0; 1.0 1.0] ./ sqrt(2)
+    fast = applygate!(deepcopy(initial), tied, 1, 2; maxdim=1)
+    measured, tied_report = applygate!(deepcopy(initial), tied, 1, 2;
+                                     maxdim=1, return_stats=true)
+    @test domain(fast.λ[1]) == domain(measured.λ[1])
+    @test only(tied_report.bond_stats).discarded_weight ≈ 0.5
+
+    tiny = copy(G)
+    block(tiny, Z2Irrep(0)) .= [1.0 -1e-9; 1e-9 1.0]
+    _, tiny_report = applygate!(deepcopy(initial), tiny, 1, 2;
+                                maxdim=1, return_stats=true)
+    tiny_stat = only(tiny_report.bond_stats)
+    @test tiny_stat.chi_req == 2 && tiny_stat.saturated && !tiny_stat.target_met
+    @test tiny_stat.discarded_weight ≈ 1e-18
+
+    ψ = deepcopy(initial)
+    _, report = applygate!(ψ, G, 1, 2; maxdim=2, truncerr=missing + 0.01,
+                           return_stats=true)
+    stat = only(report.bond_stats)
+    @test stat.chi_req == 1 && stat.chi_keep == 1 && !stat.saturated && stat.target_met
+    @test stat.discarded_weight ≈ missing
+
+    ψ = deepcopy(initial)
+    _, report = applygate!(ψ, G, 1, 2; maxdim=2, mindim=2, truncerr=missing + 0.01,
+                           svd_min=0.5, return_stats=true)
+    stat = only(report.bond_stats)
+    @test stat.chi_req == 1 && stat.chi_keep == 2
+    @test stat.discarded_weight == 0
+    @test schmidt_values(ψ, 1) ≈ [cos(θ), sin(θ)]
+
+    ψ = deepcopy(initial)
+    _, report = applygate!(ψ, G, 1, 2; maxdim=2, truncerr=0.01,
+                           svd_min=0.5, return_stats=true)
+    stat = only(report.bond_stats)
+    @test stat.chi_req == 2 && stat.chi_keep == 1 && !stat.saturated && !stat.target_met
+    @test stat.discarded_weight ≈ missing
+
+    ψ = deepcopy(initial)
+    state, report = evolve!(ψ, [(G, 1, 2), (G, 3, 4)], 1; maxdim=1, return_stats=true)
+    @test state === ψ
+    @test map(update -> only(update.bond_stats).bond, report.gate_updates) == [1, 3]
+    @test report.max_kept_dim == 1
+    @test report.num_saturated == 2
+    @test report.mean_discarded_weight ≈ report.max_discarded_weight ≈ missing
+end
+
+@testset "graded gate gauge checkpoint is a fixed-space restoration" begin
+    ψ = product_iMPS(:U1, [-1, 1], [1, -1, 1, -1])
     P = codomain(ψ.Γ[1])[2]
-    Iop = id(ComplexF64, P ⊗ P)
-    @test_throws ArgumentError applygate!(ψ, Iop, 1, 2; return_stats=true)
+    G = 0.5 * id(ComplexF64, P ⊗ P)
+    ψ0 = deepcopy(ψ)
+    raw = applygate!(deepcopy(ψ), G, 2, 3; renormalize=false)
+    @test schmidt_values(raw, 2) ≈ [0.5]
+    result, report = applygate!(ψ, G, 2, 3; gauge=:gram, return_stats=true)
+    @test result === ψ
+    @test only(report.bond_stats).chi_keep == 1
+    @test domain.(ψ.λ) == domain.(ψ0.λ)
+    for i in 1:ψ.n
+        @test norm(_TKExt._apply_site_transfer(ψ.Γ[i], id(ComplexF64, domain(ψ.Γ[i])[1]), :r)
+                   - id(ComplexF64, codomain(ψ.Γ[i])[1])) < 1e-10
+    end
+    @test_throws ArgumentError applygate!(ψ, G, 2, 3; gauge=:qr)
+    @test_throws ArgumentError applygate!(ψ, G, 2, 3; gauge=:gram, renormalize=false)
+    @test_throws ArgumentError applygate!(ψ, zero(G), 2, 3)
+    @test_throws ArgumentError applygate!(ψ, zero(G), 2, 3; return_stats=true)
+    @test convert.(Array, ψ.Γ) ≈ convert.(Array, ψ0.Γ)
+end
+
+@testset "graded transfer solve returns environments to the truncation seam" begin
+    Random.seed!(922)
+    P = graded_space(:Z2, 0=>2, 1=>1)
+    small = graded_space(:Z2, 0=>1, 1=>1)
+    large = graded_space(:Z2, 0=>3, 1=>3)
+    ψ = _TKExt._rand_symmetric_iMPS(P, [small, large, large, large])
+    seam = _TKExt._smallest_graded_seam(ψ)
+    @test seam == 1
+    for dir in (:r, :l)
+        λ, env = _TKExt._dominant_fixed_point(ψ; dir, seam, tol=1e-12, maxiter=200)
+        λref, reference = _TKExt._dominant_fixed_point(ψ; dir, tol=1e-12, maxiter=200)
+        wrap = _TKExt._fixed_point_at_wrap(ψ, env, seam, dir)
+        @test λ ≈ λref rtol=1e-9
+        @test norm(wrap - reference) < 1e-8
+        @test norm(_TKExt._apply_transfer_unit_cell(ψ, wrap; dir) - λ * wrap) < 1e-9 * λ
+    end
+    @test canonical!(ψ; maxdim=2, noninjective=:error) === ψ
+    @test all(v -> length(v) <= 2, [schmidt_values(ψ, i) for i in 1:ψ.n])
+end
+
+@testset "graded peripheral diagnostic and inverse-free support" begin
+    P = graded_space(:Z2, 0=>2)
+    V = graded_space(:Z2, 0=>1, 1=>1)
+    A = zeros(ComplexF64, V ⊗ P ← V)
+    block(A, Z2Irrep(0))[1, 1] = 1
+    block(A, Z2Irrep(1))[2, 1] = 1
+    λ = DiagonalTensorMap([1.0, 1e-9], V)
+    ψ = iMPS([copy(A), copy(A)], [copy(λ), copy(λ)], 2)
+    @test_throws ArgumentError canonical!(ψ; noninjective=:error)
+    @test_throws ArgumentError restore_canonical!(ψ; noninjective=:error)
+    @test all(T -> T == A, ψ.Γ)
+
+    G = id(ComplexF64, P ⊗ P)
+    _, report = applygate!(ψ, G, 1, 2; maxdim=2, mindim=2, svd_min=1e-8, return_stats=true)
+    @test only(report.bond_stats).chi_keep == 2
+    @test schmidt_values(ψ, 1) ≈ [1.0, 1e-9] atol=1e-14
+    for i in 1:ψ.n
+        @test norm(_TKExt._apply_site_transfer(ψ.Γ[i], id(ComplexF64, V), :r)
+                   - id(ComplexF64, V)) < 1e-12
+    end
 end
 
 @testset "applygate! validates truncation kwargs" begin
@@ -459,11 +691,7 @@ end
     # cutoff and svd_min are aliases; supplying both is ambiguous.
     @test_throws ArgumentError applygate!(ψ, Iop, 1, 2; cutoff=1e-10, svd_min=1e-10)
 
-    # mindim > 1 is not implemented in the v1 symmetric path.
-    @test_throws ArgumentError applygate!(ψ, Iop, 1, 2; mindim=2)
-
-    # truncerr > 0 likewise.
-    @test_throws ArgumentError applygate!(ψ, Iop, 1, 2; truncerr=1e-6)
+    @test_throws ArgumentError applygate!(ψ, Iop, 1, 2; mindim=2, maxdim=1)
 
     # Negative / non-finite truncation knobs are rejected.
     @test_throws ArgumentError applygate!(ψ, Iop, 1, 2; cutoff=-1.0)

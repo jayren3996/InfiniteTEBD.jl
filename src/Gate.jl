@@ -68,6 +68,11 @@ function tensor_applygate!(
     _validate_truncation_args(maxdim, mindim, truncerr, svd_floor)
     n = length(Γs)
     isone(n) && return return_stats ? ([tensor_umul(G, Γs[1])], Vector{Vector{eltype(λl)}}(), BondStat[]) : ([tensor_umul(G, Γs[1])], Vector{Vector{eltype(λl)}}())
+    if n == 2 && _needs_inverse_free_reconstruction(λl)
+        bond = isnothing(bond_indices) ? 1 : first(bond_indices)
+        return _apply_two_site_gate(G, Γs[1], Γs[2], λl, bond;
+            maxdim, mindim, truncerr, svd_min=svd_floor, renormalize, return_stats)
+    end
     Γ = tensor_group(Γs)
     tensor_lmul!(λl, Γ)
     GΓ = tensor_umul(G, Γ)
@@ -84,10 +89,56 @@ function tensor_applygate!(
         bond_indices,
     )
 end
+
+function _needs_inverse_free_reconstruction(λ)
+    scale = float(maximum(abs, λ; init=0))
+    threshold = scale * sqrt(eps(typeof(scale)))
+    return any(s -> 0 < abs(s) < threshold, λ)
+end
+
+function _apply_two_site_gate(G, A, B, λl, bond; maxdim, mindim, truncerr,
+                              svd_min, renormalize, return_stats)
+    left, dleft, _ = size(A)
+    dright = size(B, 2)
+    C = tensor_umul(G, tensor_group_2(A, B))
+    weighted = copy(C)
+    tensor_lmul!(λl, weighted)
+    factor, choice = _svd_rank_choice(reshape(weighted, left*dleft, :);
+        maxdim, mindim, truncerr, svd_min)
+    k = choice.chi_keep
+    S = factor.S[1:k]
+    Vt = factor.Vt[1:k, :]
+    tensors, spectra = _reconstruct_two_site(C, λl, S, Vt, dleft, dright; renormalize)
+    if return_stats
+        stats = BondStat(bond, choice.chi_req, choice.chi_keep,
+            choice.discarded_weight, choice.saturated, choice.target_met,
+            choice.smallest_kept_sv, choice.largest_discarded_sv)
+        return tensors, spectra, [stats]
+    end
+    return tensors, spectra
+end
+
+function _reconstruct_two_site(C, λl, S, Vt, dleft, dright; renormalize)
+    left, _, right = size(C)
+    # From Λ_left C V = U S, reconstruct the stored left tensor using
+    # C V rather than multiplying U S by a numerically large inverse.
+    left_tensor = reshape(reshape(C, left*dleft, :) * Vt', left, dleft, :)
+    for a in eachindex(λl)
+        iszero(λl[a]) && fill!(view(left_tensor, a, :, :), zero(eltype(left_tensor)))
+    end
+    if renormalize
+        scale = norm(S)
+        isfinite(scale) && scale > 0 || throw(ArgumentError(
+            "cannot renormalize singular values with zero or non-finite norm"))
+        S ./= scale
+        left_tensor ./= scale
+    end
+    return [left_tensor, reshape(Vt, :, dright, right)], [convert(Vector{eltype(λl)}, S)]
+end
 #---------------------------------------------------------------------------------------------------
 export applygate!
 """
-    applygate!(ψ, G, i, j; maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, recanonicalize=false, return_stats=false)
+    applygate!(ψ, G, i, j; maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, recanonicalize=false, gauge=nothing, return_stats=false)
 
 Apply a local gate `G` in place to the contiguous region from site `i` to site
 `j` of the periodic unit cell.
@@ -129,6 +180,10 @@ Keyword arguments:
   downstream truncations stay accurate. Note: over long unitary evolutions
   the Vidal-gauge division by small Schmidt values accumulates drift too, so
   re-canonicalise periodically if you need high accuracy.
+- `gauge=nothing`
+  Request a fixed-bond-dimension gauge checkpoint after this gate with
+  `:gram`, `:qr`, or `:auto`. Requires `renormalize=true` and
+  `recanonicalize=false`. A failed gauge checkpoint leaves the input intact.
 - `return_stats=false`
   If `true`, also return per-bond truncation diagnostics for this gate update.
 
@@ -170,12 +225,24 @@ function applygate!(
     cutoff::Union{Nothing,Real}=nothing,
     renormalize::Bool=true,
     recanonicalize::Bool=false,
+    gauge::Union{Nothing,Symbol}=nothing,
     return_stats::Bool=false
 )
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_truncation_args(maxdim, mindim, truncerr, svd_floor)
     _check_gate_eltype(ψ, G)
     i0, j0 = _normalize_gate_sites(ψ, i, j)
+    _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
+    if !isnothing(gauge)
+        trial = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
+        i0 == j0 && (trial.Γ[i0] = copy(trial.Γ[i0]))
+        result = applygate!(trial, G, i0, j0;
+            maxdim, mindim, truncerr, svd_min=svd_floor, renormalize, return_stats)
+        restore_canonical!(trial; method=gauge)
+        ψ.Γ .= trial.Γ
+        ψ.λ .= trial.λ
+        return return_stats ? (ψ, result[2]) : ψ
+    end
     if isequal(i0, j0)
         tensor_umul!(G, ψ.Γ[i0])
         if renormalize
@@ -254,6 +321,15 @@ function applygate!(
     end
     return_stats && return ψ, _gate_update_stats(i0, j0, bond_stats)
     return ψ
+end
+
+function _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
+    isnothing(gauge) && return nothing
+    allowed = ψ isa DenseIMPS ? (:gram, :qr, :auto) : (:gram,)
+    gauge in allowed || throw(ArgumentError("gauge must be one of $allowed for this state"))
+    renormalize && !recanonicalize || throw(ArgumentError(
+        "a gauge checkpoint requires renormalize=true and recanonicalize=false"))
+    return nothing
 end
 
 """
@@ -392,10 +468,8 @@ function _validate_trotter_scheme(num_layers::Integer, trotter::Symbol)
     if trotter === :fourth && num_layers < 2
         throw(ArgumentError(
             "trotter = :fourth requires at least two commuting layers " *
-            "(single-layer Hamiltonians silently degrade to first-order Euler " *
-            "because the five Suzuki substeps merge into one stage); use " *
-            ":second for single-layer evolution, or split the Hamiltonian " *
-            "into commuting layers."))
+            "in this interface. Use :second for a single commuting layer, " *
+            "which already gives its exact propagator before truncation."))
     end
     if trotter === :fourth_opt && num_layers != 2
         throw(ArgumentError("trotter = :fourth_opt requires exactly two commuting layers"))
@@ -506,6 +580,21 @@ function _trotter_stage_schedule(num_layers::Integer, trotter::Symbol, steps::In
     return stages
 end
 
+export trotter_stages
+
+"""
+    trotter_stages(num_layers; trotter=:second, steps=1)
+
+Return the ordered `(layer, coefficient)` pairs used by
+[`trotter_gates`](@ref). Apply layer `k` for time `coefficient * dt`.
+Use the coefficients to prepare custom gates, including structured gates
+or gates on separated endpoints. This schedule uses the same boundary
+merges as the materialized gate-list interface.
+"""
+function trotter_stages(num_layers::Integer; trotter::Symbol=:second, steps::Integer=1)
+    return _trotter_stage_schedule(num_layers, trotter, steps)
+end
+
 function _trotter_time_prefactor(dt::Real, coeff::Real, evolution::Symbol)
     if evolution === :real
         return -1im * coeff * dt
@@ -519,29 +608,72 @@ function _materialize_trotter_gates(
     layers,
     dt::Real,
     stages::AbstractVector{<:Tuple{Int, <:Real}};
-    evolution::Symbol=:real
+    evolution::Symbol=:real,
+    stage_ends::Union{Nothing,Vector{Int}}=nothing,
 )
     prefactor = _trotter_time_prefactor(dt, 1.0, evolution)
-    htypes = Type[]
+    T = Union{}
+    has_diagonal = false
+    has_dense = false
     for layer in layers, term in layer
-        push!(htypes, eltype(term[1]))
+        h = term[1]
+        T = promote_type(T, eltype(h))
+        has_diagonal |= h isa Diagonal
+        has_dense |= !(h isa Diagonal)
     end
-    T = isempty(htypes) ? ComplexF64 : promote_type(htypes..., typeof(prefactor))
-    cache = Dict{Tuple{Int, Int, Float64}, Matrix{T}}()
-    gates = Tuple{Matrix{T}, Int, Int}[]
+    T = T === Union{} ? ComplexF64 : promote_type(T, typeof(prefactor))
+    diagonal_type = Diagonal{T,Vector{T}}
+    gate_type = has_diagonal ? (has_dense ? Union{diagonal_type,Matrix{T}} : diagonal_type) : Matrix{T}
+    cache = IdDict{Any, Dict{Float64, gate_type}}()
+    gates = Tuple{gate_type, Int, Int}[]
+    if all(layer -> layer isa AbstractVector || layer isa Tuple, layers)
+        sizehint!(gates, sum(length(layers[layer]) for (layer, _) in stages; init=0))
+    end
 
     for (layer_idx, coeff) in stages
-        for (term_idx, term) in enumerate(layers[layer_idx])
-            h, i, j = term
-            key = (layer_idx, term_idx, Float64(coeff))
-            G = get!(cache, key) do
-                exp(_trotter_time_prefactor(dt, coeff, evolution) * h)
+        scale = _trotter_time_prefactor(dt, coeff, evolution)
+        for (h, i, j) in layers[layer_idx]
+            by_coefficient = get!(() -> Dict{Float64, gate_type}(), cache, h)
+            G = get!(by_coefficient, Float64(coeff)) do
+                h isa Diagonal ? Diagonal(Vector{T}(exp.(scale .* h.diag))) :
+                    convert(Matrix{T}, exp(scale * h))
             end
             push!(gates, (G, i, j))
         end
+        isnothing(stage_ends) || push!(stage_ends, length(gates))
     end
 
     return gates
+end
+
+# The published multi-layer schedules begin and end in the same layer.
+# Reuse the gates for that merged boundary and for the interior stages.
+function _iterated_trotter_gates(layers, dt, steps; trotter, evolution)
+    n = length(layers)
+    _validate_trotter_evolution(trotter, evolution)
+    stages = _trotter_stage_schedule(n, trotter, min(steps, 1))
+    if steps <= 1 || n == 1
+        gates = _materialize_trotter_gates(layers, dt, stages; evolution)
+        return steps <= 1 || isempty(gates) ? gates : Iterators.flatten(Iterators.repeated(gates, steps))
+    end
+
+    first_layer, first_coeff = first(stages)
+    last_layer, last_coeff = last(stages)
+    first_layer == last_layer || error("Trotter schedule must have matching boundary layers")
+    m = length(stages)
+    # An empty extra stage for a canceled boundary has no gate applications.
+    if abs(last_coeff + first_coeff) > ZEROTOL
+        push!(stages, (first_layer, last_coeff + first_coeff))
+    end
+    stage_ends = Int[]
+    gates = _materialize_trotter_gates(layers, dt, stages; evolution, stage_ends)
+    isempty(gates) && return gates
+    initial = view(gates, 1:stage_ends[m-1])
+    interior = view(gates, stage_ends[1]+1:stage_ends[m-1])
+    boundary = view(gates, stage_ends[m]+1:length(gates))
+    final = view(gates, stage_ends[m-1]+1:stage_ends[m])
+    repeating = Iterators.flatten(Iterators.repeated((boundary, interior), steps-1))
+    return Iterators.flatten(Iterators.flatten(((initial,), repeating, (final,))))
 end
 
 function _evolve_gate_sequence!(
@@ -562,7 +694,7 @@ function _evolve_gate_sequence!(
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_chi_policy(chi_policy)
     gate_updates = return_stats ? Any[] : nothing
-    χ = min(maxdim, max(mindim, maximum(_bond_dim, ψ.λ; init=mindim)))
+    χ = chi_policy === :adaptive ? min(maxdim, max(mindim, maximum(_bond_dim, ψ.λ; init=mindim))) : maxdim
     for gate in gates
         G, i, j = gate
         if return_stats
@@ -608,10 +740,12 @@ end
 
 export trotter_gates
 """
-    trotter_gates(layers, dt; trotter=:second, evolution=:real)
+    trotter_gates(layers, dt; trotter=:second, evolution=:real, steps=1)
 
-Materialize one Trotter macro-step from a Hamiltonian split into commuting
-layers.
+Materialize `steps` Trotter macro-steps from a Hamiltonian split into commuting
+layers, as used by `evolve!(ψ, layers, dt, steps)`. For multiple layers the
+schedule merges adjacent substeps of the same layer across step boundaries.
+For one layer it keeps the individual steps and their intermediate truncations.
 
 Each element of `layers` is a collection of local Hamiltonian terms
 `(h, i, j)`. Terms inside a single layer are assumed to commute, so their dense
@@ -634,9 +768,14 @@ Keyword arguments:
 - `evolution=:real`
   Use `:real` to build gates `exp(-1im * c * dt * h)` or `:imaginary` to build
   second-order imaginary-time gates `exp(-c * dt * h)`.
+- `steps=1`
+  Number of macro-steps to generate. Zero returns an empty gate list.
 
 Returns:
-- A vector of dense local gates `(G, i, j)` implementing one macro-step.
+- A vector of local gates `(G, i, j)` for the full requested interval.
+  Diagonal terms yield `Diagonal` gates.
+  Apply the vector once with `evolve!(ψ, gates, 1)`.
+  Entries can share a matrix; copy it before editing an individual gate.
 
 Notes:
 - `trotter = :fourth_opt` requires exactly two layers.
@@ -655,30 +794,31 @@ function trotter_gates(
     layers,
     dt::Real;
     trotter::Symbol=:second,
-    evolution::Symbol=:real
+    evolution::Symbol=:real,
+    steps::Integer=1
 )
     _validate_trotter_scheme(length(layers), trotter)
     _validate_trotter_evolution(trotter, evolution)
 
-    stages = _trotter_stage_schedule(length(layers), trotter, 1)
+    stages = trotter_stages(length(layers); trotter, steps)
     return _materialize_trotter_gates(layers, dt, stages; evolution)
 end
 
 export evolve!
 """
-    evolve!(ψ, gates, steps; maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, return_stats=false)
+    evolve!(ψ, gates, steps; maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, gauge=nothing, return_stats=false)
 
 Apply a sequence of local gates repeatedly for `steps` sweeps.
 
-Each element of `gates` must be a tuple `(G, i, j)` consisting of the local
-operator `G` and the support `i:j` inside the unit cell.
+Each element of `gates` must be a tuple `(G, i, j)`. A matrix acts on the full
+periodic interval `i:j`. A prepared [`EndpointGate`](@ref) acts only at its
+two endpoints.
 
 Parameters:
 - `ψ`
   State to evolve in place.
 - `gates`
-  Iterable of tuples `(G, i, j)`. Each tuple specifies a dense local operator
-  `G` and the contiguous support `i:j` inside the unit cell.
+  Iterable of `(G, i, j)` tuples, with matrices or prepared endpoint gates.
 - `steps`
   Number of full sweeps through the gate list.
 
@@ -702,6 +842,11 @@ Keyword arguments:
   imaginary-time evolution to a ground state, pass `recanonicalize=true` so
   every step truncates in the canonical basis and the final observables are
   accurate.
+- `gauge=nothing`
+  Pass `:gram`, `:qr`, or `:auto` for a fixed-bond-dimension checkpoint
+  after each full gate-list sweep. TensorKit supports `:gram`.
+  Requires `renormalize=true` and `recanonicalize=false`. If a sweep or
+  its checkpoint fails, the state retains the last completed sweep.
 - `return_stats=false`
   If `true`, also return aggregated truncation diagnostics for the full
   evolution.
@@ -740,16 +885,19 @@ function evolve!(
     alpha::Real=0.1,
     renormalize::Bool=true,
     recanonicalize::Bool=false,
+    gauge::Union{Nothing,Symbol}=nothing,
     return_stats::Bool=false
 )
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_evolve_args(steps, maxdim, mindim, truncerr, svd_floor)
     _validate_chi_policy(chi_policy)
+    _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
 
     gate_updates = return_stats ? Any[] : nothing
     for _ in 1:steps
+        trial = isnothing(gauge) ? ψ : deepcopy(ψ)
         updates = _evolve_gate_sequence!(
-            ψ,
+            trial,
             gates;
             maxdim,
             mindim,
@@ -762,6 +910,11 @@ function evolve!(
             recanonicalize,
             return_stats,
         )
+        if !isnothing(gauge)
+            restore_canonical!(trial; method=gauge)
+            ψ.Γ .= trial.Γ
+            ψ.λ .= trial.λ
+        end
         return_stats && append!(gate_updates, updates)
     end
 
@@ -769,12 +922,12 @@ function evolve!(
 end
 
 """
-    evolve!(ψ, layers, dt, steps; trotter=:second, evolution=:real, maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, return_stats=false)
+    evolve!(ψ, layers, dt, steps; trotter=:second, evolution=:real, maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, gauge=nothing, return_stats=false)
 
 Evolve `ψ` under a Hamiltonian split into commuting layers.
 
-Each layer is a collection of local Hamiltonian terms `(h, i, j)`. One
-Trotterized macro-step is first expanded into a gate sequence with
+Each layer is a collection of local Hamiltonian terms `(h, i, j)`. The full
+evolution interval is first expanded into a gate sequence with
 [`trotter_gates`](@ref), after which the resulting dense gates are applied in
 place with the same local truncation controls as the gate-list [`evolve!`](@ref)
 method.
@@ -810,6 +963,8 @@ Notes:
   responsible for ensuring that they commute.
 - `trotter = :fourth_opt` requires exactly two layers.
 - Higher-order Trotter schemes currently reject `evolution = :imaginary`.
+- A `gauge` checkpoint keeps Trotter macro-step boundaries explicit, so
+  adjacent half-steps across those boundaries are applied separately.
 
 Example:
 ```julia
@@ -837,20 +992,26 @@ function evolve!(
     alpha::Real=0.1,
     renormalize::Bool=true,
     recanonicalize::Bool=false,
+    gauge::Union{Nothing,Symbol}=nothing,
     return_stats::Bool=false
 )
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_evolve_args(steps, maxdim, mindim, truncerr, svd_floor)
     _validate_chi_policy(chi_policy)
-    _validate_trotter_scheme(length(layers), trotter)
-    _validate_trotter_evolution(trotter, evolution)
+    _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
 
-    stages = _trotter_stage_schedule(length(layers), trotter, steps)
-    gates = _materialize_trotter_gates(layers, dt, stages; evolution)
+    if !isnothing(gauge) && steps > 0
+        gates = trotter_gates(layers, dt; trotter, evolution)
+        isempty(gates) || _check_gate_eltype(ψ, gates[1][1])
+        return evolve!(ψ, gates, steps; maxdim, mindim, truncerr, svd_min=svd_floor,
+            chi_policy, q, alpha, renormalize, gauge, return_stats)
+    end
+    gates = _iterated_trotter_gates(layers, dt, steps; trotter, evolution)
     # Fail before touching ψ: real-time gates are complex, so a default
     # Float64 state would otherwise error mid-sweep with part of the unit
     # cell already updated.
-    isempty(gates) || _check_gate_eltype(ψ, gates[1][1])
+    head = iterate(gates)
+    isnothing(head) || _check_gate_eltype(ψ, head[1][1])
 
     updates = _evolve_gate_sequence!(
         ψ,
@@ -899,6 +1060,14 @@ function _operator_to_internal(mat::AbstractMatrix, dims::AbstractVector{<:Integ
     tensor = reshape(mat, (rd..., rd...))
     tensor = permutedims(tensor, [n:-1:1; 2n:-1:n+1])
     return reshape(tensor, D, D)
+end
+
+function _operator_to_internal(mat::Diagonal, dims::AbstractVector{<:Integer})
+    length(dims) <= 1 && return mat
+    length(mat.diag) == prod(dims) || throw(DimensionMismatch(
+        "diagonal operator has size $(size(mat)); incompatible with site dimensions $dims"))
+    order = length(dims):-1:1
+    return Diagonal(vec(permutedims(reshape(mat.diag, Tuple(reverse(dims))), order)))
 end
 
 """

@@ -75,7 +75,7 @@ function aklt_setup()
     gate = exp(-dt * h)
     layers = [[(h, 1, 2)], [(h, 2, 1)]]
     Random.seed!(1234)
-    template = InfiniteTEBD.rand_iMPS(2, 3, AKLT_MAXDIM)
+    template = InfiniteTEBD.rand_iMPS(ComplexF64, 2, 3, AKLT_MAXDIM)
     return (; dt, h, gate, layers, template)
 end
 
@@ -153,8 +153,7 @@ end
 function realtime_exact_error(setup, dt::Real, steps::Integer, order::Symbol)
     total_time = dt * steps
     exact = exp(-1im * total_time * (setup.a + setup.b))
-    stages = InfiniteTEBD._trotter_stage_schedule(length(setup.layers), order, steps)
-    gates = InfiniteTEBD._materialize_trotter_gates(setup.layers, dt, stages; evolution=:real)
+    gates = trotter_gates(setup.layers, dt; trotter=order, steps)
     approx = gate_product(gates)
     return opnorm(approx - exact)
 end
