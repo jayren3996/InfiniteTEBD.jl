@@ -24,11 +24,13 @@ const TEST_GROUPS = Dict(
         "test_symmetric_struct.jl",
         "test_symmetric_basic.jl",
         "test_symmetric_construction.jl",
+        "test_layer_mpo.jl",
     ],
     "api" => [
         "test_truncation_control.jl",
         "test_evolve_api.jl",
         "test_scarfinder_nstep.jl",
+        "test_pxp_mpo.jl",
     ],
     "smoke" => [
         "test_docs_smoke.jl",

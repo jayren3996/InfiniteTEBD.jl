@@ -1,0 +1,1270 @@
+#---------------------------------------------------------------------------------------------------
+# INFINITE MPO
+#---------------------------------------------------------------------------------------------------
+export iMPO, bonddims, layer_mpo, check_commuting, compress_mpo, mpo_multiply
+export apply!, trotter_mpos, truncate!, energy_fix!
+
+# ITensorMPS (a dependency) already owns and exports a generic `truncate!`.
+# Extending it keeps `using InfiniteTEBD, ITensorMPS` free of a name clash.
+import ITensorMPS: truncate!
+
+"""Default relative singular-value cutoff used when splitting gates into MPOs."""
+const MPO_CUTOFF::Float64 = 1e-14
+
+"""
+    iMPO{T}
+
+Infinite matrix-product operator with a periodic unit cell of `n` sites.
+
+Fields:
+- `W::Vector{Array{T,4}}`
+  One tensor per unit-cell site, indexed `W[i][l, o, s, r]`: left bond `l`,
+  output (bra) physical index `o`, input (ket) physical index `s`, right bond
+  `r`. Shape `(Dl, d_out, d_in, Dr)`. The bond to the right of site `i` must
+  match the bond to the left of site `i + 1`, with periodic wraparound.
+- `n::Int`
+  Unit-cell length.
+
+Indexing `W[i]` returns the tensor of site `mod1(i, n)`. The operator acts on
+an iMPS whose unit cell is a multiple of `n`; see [`apply!`](@ref).
+
+Construct from a list of tensors with `iMPO(Ws)`, or from commuting local gates
+with [`layer_mpo`](@ref) and [`trotter_mpos`](@ref). `A * B` is the operator
+product (`B` acts first); see [`mpo_multiply`](@ref).
+
+Example:
+```julia
+X = ComplexF64[0 1; 1 0]
+W = iMPO([reshape(X, 1, 2, 2, 1)])   # the product operator ⊗_j X_j
+bonddims(W)                          # [1]
+```
+"""
+struct iMPO{T<:Number}
+    W::Vector{Array{T,4}}
+    n::Int
+
+    function iMPO(W::Vector{Array{T,4}}, n::Integer) where {T<:Number}
+        n > 0 || throw(ArgumentError("iMPO unit-cell length n must be positive (got $n)"))
+        length(W) == n || throw(ArgumentError("iMPO: length(W) = $(length(W)) but n = $n"))
+        for i in 1:n
+            j = mod1(i + 1, n)
+            size(W[i], 4) == size(W[j], 1) || throw(DimensionMismatch(
+                "iMPO bond $i: size(W[$i], 4) = $(size(W[i], 4)) but " *
+                "size(W[$j], 1) = $(size(W[j], 1))"))
+            all(isfinite, W[i]) || throw(ArgumentError("iMPO tensor W[$i] contains non-finite values"))
+        end
+        return new{T}(W, Int(n))
+    end
+end
+
+function iMPO(Ws::AbstractVector{<:AbstractArray{<:Number,4}})
+    isempty(Ws) && throw(ArgumentError("iMPO needs at least one tensor"))
+    T = mapreduce(eltype, promote_type, Ws)
+    return iMPO([Array{T,4}(A) for A in Ws], length(Ws))
+end
+
+Base.eltype(::iMPO{T}) where {T} = T
+Base.length(W::iMPO) = W.n
+Base.getindex(W::iMPO, i::Integer) = W.W[mod1(i, W.n)]
+Base.copy(W::iMPO) = iMPO([copy(A) for A in W.W], W.n)
+
+"""
+    bonddims(W::iMPO)
+
+Bond dimensions of `W`; entry `i` is the bond to the right of site `i`.
+"""
+bonddims(W::iMPO) = [size(A, 4) for A in W.W]
+
+function Base.show(io::IO, W::iMPO{T}) where {T}
+    print(io, "iMPO{$T}(n=$(W.n), d=$([size(A, 3) for A in W.W]), bonddims=$(bonddims(W)))")
+end
+
+# The site tensors over `m` sites, cycling through the cell.
+_tiled_tensors(W::iMPO, m::Integer) = [W[i] for i in 1:m]
+
+#---------------------------------------------------------------------------------------------------
+# Supports longer than the cell
+#---------------------------------------------------------------------------------------------------
+"""
+    _term_support(i, j, n)
+
+Absolute support `(i, j)` with `i ≤ j` and `i ∈ 1:n` of a local term.
+
+Convention (used by [`layer_mpo`](@ref), [`trotter_mpos`](@ref),
+[`check_commuting`](@ref) and the site-dependent [`energy_density`](@ref)):
+`(i, j)` with `i ≤ j` denotes the chain sites `i, i+1, …, j`, which may be
+more sites than the unit cell holds; site `k` is unit-cell site `mod1(k, n)`.
+The term is repeated with period `n`. The legacy wraparound form `j < i` of
+`trotter_gates` is accepted and means `j + n` (for example `(4, 1)` in a
+four-site cell is the pair of sites 4 and 5).
+"""
+function _term_support(i::Integer, j::Integer, n::Integer)
+    n > 0 || throw(ArgumentError("unit-cell length must be positive"))
+    j < i && (j += n * cld(i - j, n))
+    shift = fld(i - 1, n) * n
+    return Int(i - shift), Int(j - shift)
+end
+
+function _support_span(G::AbstractMatrix, i::Integer, j::Integer, n::Integer, d)
+    size(G, 1) == size(G, 2) || throw(ArgumentError("local operators must be square"))
+    a, b = _term_support(i, j, n)
+    L = b - a + 1
+    D = size(G, 1)
+    dd = isnothing(d) ? round(Int, D^(1 / L)) : Int(d)
+    dd^L == D || throw(ArgumentError(
+        "operator of size $D cannot act on the $L sites $i:$j" *
+        (isnothing(d) ? "" : " of local dimension $dd") *
+        ". Supports longer than the cell are written with i ≤ j, e.g. (2, 4) for three sites " *
+        "of a two-site cell"))
+    return a, b, L, dd
+end
+
+# Uniform local dimension shared by every term in `terms`.
+function _uniform_local_dim(terms, n, d)
+    dd = d
+    for (G, i, j) in terms
+        _, _, _, dg = _support_span(G, i, j, n, dd)
+        isnothing(dd) && (dd = dg)
+    end
+    isnothing(dd) && throw(ArgumentError("cannot infer a local dimension from an empty layer"))
+    return dd
+end
+
+_dense(G::AbstractMatrix) = Matrix(G)
+
+#---------------------------------------------------------------------------------------------------
+# Commutation check
+#---------------------------------------------------------------------------------------------------
+# Embed G (kron convention) acting on sites a:b into the interval lo:hi.
+function _embed(G::AbstractMatrix, a, b, lo, hi, d)
+    left = d^(a - lo)
+    right = d^(hi - b)
+    M = _dense(G)
+    left > 1 && (M = kron(Matrix{eltype(M)}(I, left, left), M))
+    right > 1 && (M = kron(M, Matrix{eltype(M)}(I, right, right)))
+    return M
+end
+
+"""
+    check_commuting(layer; n=nothing, atol=1e-12, d=nothing)
+
+Check numerically that the overlapping gates of `layer` commute, and throw an
+`ArgumentError` naming the first offending pair otherwise. Returns `true`.
+
+`layer` is a list of `(G, i, j)` tuples. Supports follow the convention of
+[`layer_mpo`](@ref): `i ≤ j` are chain sites, possibly more than one cell.
+With `n` given, the layer is treated as periodic with period `n`, and every
+translate of every gate is tested against every overlapping translate
+(including a gate against its own translates). Without `n`, only the listed
+gates are compared, at the listed positions.
+
+The test is `‖AB − BA‖ ≤ atol · ‖A‖ · ‖B‖` (Frobenius norms) on the union of
+the two supports. Gates that do not overlap always commute.
+
+Example:
+```julia
+n = [0 0; 0 1]; X = [0 1; 1 0]
+check_commuting([(kron(n, X), 1, 2), (kron(n, X), 2, 3)])  # throws: X and n meet on site 2
+```
+"""
+function check_commuting(layer; n::Union{Nothing,Integer}=nothing, atol::Real=1e-12,
+                         d::Union{Nothing,Integer}=nothing)
+    terms = collect(layer)
+    isempty(terms) && return true
+    period = isnothing(n) ? 0 : Int(n)
+    supports = map(terms) do (G, i, j)
+        if isnothing(n)
+            i <= j || throw(ArgumentError("without n, supports must satisfy i ≤ j (got ($i, $j))"))
+            L = j - i + 1
+            dd = isnothing(d) ? round(Int, size(G, 1)^(1 / L)) : d
+            dd^L == size(G, 1) || throw(ArgumentError("operator size does not match support ($i, $j)"))
+            (Int(i), Int(j), dd)
+        else
+            a, b, _, dd = _support_span(G, i, j, n, d)
+            (a, b, dd)
+        end
+    end
+    dd = supports[1][3]
+    all(s -> s[3] == dd, supports) || throw(ArgumentError("check_commuting requires a uniform local dimension"))
+    for p in eachindex(terms), q in p:length(terms)
+        ap, bp, _ = supports[p]
+        aq, bq, _ = supports[q]
+        shifts = if period == 0
+            p == q ? Int[] : [0]
+        else
+            # translates of q by k·n that overlap p; skip p against itself
+            kmin = cld(ap - bq, period)
+            kmax = fld(bp - aq, period)
+            [k * period for k in kmin:kmax if !(p == q && k == 0)]
+        end
+        for s in shifts
+            a2, b2 = aq + s, bq + s
+            max(ap, a2) <= min(bp, b2) || continue
+            lo, hi = min(ap, a2), max(bp, b2)
+            A = _embed(terms[p][1], ap, bp, lo, hi, dd)
+            B = _embed(terms[q][1], a2, b2, lo, hi, dd)
+            err = norm(A * B - B * A)
+            err <= atol * norm(A) * norm(B) || throw(ArgumentError(
+                "gates $p (sites $ap:$bp) and $q (sites $a2:$b2) do not commute " *
+                "(‖[A, B]‖ = $err). layer_mpo requires overlapping gates of a layer to commute; " *
+                "put them in different layers"))
+        end
+    end
+    return true
+end
+
+#---------------------------------------------------------------------------------------------------
+# Gate → MPO
+#---------------------------------------------------------------------------------------------------
+# Operator Schmidt decomposition of an L-site gate (kron convention) into L
+# tensors (Dl, d, d, Dr), cutting every internal bond by an SVD and dropping
+# singular values below `cutoff` times the largest one on that cut.
+function _gate_mpo_pieces(G::AbstractMatrix, d::Integer, L::Integer, cutoff::Real)
+    T = promote_type(eltype(G), Float64)
+    M = Matrix{T}(G)
+    L == 1 && return [reshape(Matrix{T}(M), 1, d, d, 1)]
+    # reshape gives indices (o_L, …, o_1, i_L, …, i_1); reorder to (o_1, i_1, …, o_L, i_L)
+    tensor = reshape(M, ntuple(_ -> d, 2L))
+    perm = Int[]
+    for p in 1:L
+        push!(perm, L - p + 1, 2L - p + 1)
+    end
+    rest = reshape(permutedims(tensor, perm), d * d, :)
+    pieces = Vector{Array{T,4}}(undef, L)
+    Dl = 1
+    for p in 1:L-1
+        F = svd(reshape(rest, Dl * d * d, :))
+        smax = isempty(F.S) ? zero(real(T)) : F.S[1]
+        k = max(1, count(>(cutoff * smax), F.S))
+        pieces[p] = reshape(F.U[:, 1:k], Dl, d, d, k)
+        rest = F.S[1:k] .* F.Vt[1:k, :]
+        Dl = k
+    end
+    pieces[L] = reshape(rest, Dl, d, d, 1)
+    return pieces
+end
+
+# W_new = P ∘ W (P acts after W); bonds fuse as (bond of W) fastest.
+function _compose_site(P::AbstractArray{<:Number,4}, W::AbstractArray{<:Number,4})
+    @tensor C[lw, lp, o, i, rw, rp] := P[lp, o, m, rp] * W[lw, m, i, rw]
+    s = size(C)
+    return reshape(C, s[1] * s[2], s[3], s[4], s[5] * s[6])
+end
+
+"""
+    layer_mpo(layer, n; cutoff=1e-14, check=true, d=nothing)
+
+Build the exact infinite MPO of one commuting layer of local gates, repeated
+with period `n`.
+
+`layer` is a list of `(G, i, j)` tuples, as in a layer of
+[`trotter_gates`](@ref): a dense gate `G` (in the `kron` convention, leftmost
+site = leftmost factor) on the contiguous sites `i..j`.
+
+Support convention:
+- `(i, j)` with `i ≤ j` are chain sites `i, i+1, …, j`, and site `k` lives on
+  unit-cell site `mod1(k, n)`. A support may be longer than the cell: in a
+  two-site cell, the three-site term centred on site 1 is `(2, 4)` (sites
+  2, 1, 2 of the cell) and the one centred on site 2 is `(1, 3)`. In general
+  a term of span `L` centred on `c` is `(c - (L-1)÷2, c + L÷2)`; any shift by
+  a multiple of `n` names the same term.
+- `j < i` is the legacy wraparound of `trotter_gates` and means `j + n`.
+- The gate size must equal `d^L` with `L = j - i + 1` (checked).
+
+Precondition (the supported case):
+- Gates may overlap, including a gate with its own translates by `n`, but only
+  on sites where they commute. `check=true` verifies this with
+  [`check_commuting`](@ref) and throws otherwise.
+- Each bond of the cell is crossed by at most one gate (counting translates).
+  This also bounds the span by `n + 1`. A violation throws an `ArgumentError`.
+
+Method: each gate is split by an operator Schmidt decomposition (an SVD
+across each internal bond, dropping singular values below `cutoff` times the
+largest on that cut). Where gate pieces share a site, their single-site
+operators are multiplied in layer order (the first listed gate acts first).
+Bonds that no gate crosses get bond dimension 1. Since every bond is crossed
+by one gate, the MPO bond dimension equals the operator Schmidt rank of that
+gate across that bond, and the MPO equals the product of all gates exactly
+(up to the dropped singular values).
+
+Returns an [`iMPO`](@ref) with cell length `n`.
+
+Example (PXP: each gate flips the centre only if both neighbours are empty, so
+the operator Schmidt rank is 2 on every bond):
+```julia
+X = [0 1; 1 0]; P = [1 0; 0 0]
+U = exp(-0.1im * kron(P, X, P))
+W = layer_mpo([(U, 2, 4)], 2)   # gates centred on the odd sites of a 2-site cell
+bonddims(W)                     # [2, 2]
+```
+"""
+function layer_mpo(layer, n::Integer; cutoff::Real=MPO_CUTOFF, check::Bool=true,
+                   d::Union{Nothing,Integer}=nothing)
+    n > 0 || throw(ArgumentError("unit-cell length n must be positive"))
+    isfinite(cutoff) && cutoff >= 0 || throw(ArgumentError("cutoff must be finite and non-negative"))
+    terms = collect(layer)
+    isempty(terms) && throw(ArgumentError("layer_mpo needs at least one gate"))
+    dd = _uniform_local_dim(terms, n, d)
+    check && check_commuting(terms; n, d=dd)
+
+    T = mapreduce(t -> eltype(t[1]), promote_type, terms)
+    T = promote_type(T, Float64)
+    # Which gate crosses each cell bond (bond b sits right of site b).
+    crossing = zeros(Int, n)
+    pieces = Vector{Vector{Array{T,4}}}(undef, length(terms))
+    at_site = [Tuple{Int,Int}[] for _ in 1:n]
+    for (g, (G, i, j)) in enumerate(terms)
+        a, b, L, _ = _support_span(G, i, j, n, dd)
+        pieces[g] = [Array{T,4}(A) for A in _gate_mpo_pieces(G, dd, L, cutoff)]
+        for p in 1:L
+            c = mod1(a + p - 1, n)
+            push!(at_site[c], (g, p))
+            if p < L
+                crossing[c] == 0 || throw(ArgumentError(
+                    "bond $c of the cell is crossed by gate $(crossing[c]) and by gate $g " *
+                    "(or by two translates of one gate). layer_mpo supports at most one " *
+                    "gate across each bond; split the layer, or use a larger cell n"))
+                crossing[c] = g
+            end
+        end
+    end
+
+    W = Vector{Array{T,4}}(undef, n)
+    for c in 1:n
+        # Layer order: earlier gates act first. Among the pieces of one gate on
+        # a site (span n + 1), the left translate's piece acts first.
+        order = sort(at_site[c]; by=gp -> (gp[1], -gp[2]))
+        site = reshape(Matrix{T}(I, dd, dd), 1, dd, dd, 1)
+        for (g, p) in order
+            site = _compose_site(pieces[g][p], site)
+        end
+        W[c] = site
+    end
+    return iMPO(W, n)
+end
+
+#---------------------------------------------------------------------------------------------------
+# MPO algebra
+#---------------------------------------------------------------------------------------------------
+# Dominant eigenvalue (with phase) of the mixed cell transfer ∑ conj(A)⊗B.
+function _mixed_cell_eigenvalue(As, Bs)
+    Da, Db = size(As[1], 1), size(Bs[1], 1)
+    Tm = promote_type(eltype(As[1]), eltype(Bs[1]), ComplexF64)
+    function step(x)
+        X = reshape(x, Da, Db)
+        for (A, B) in zip(As, Bs)
+            @tensor Y[a2, b2] := conj(A[a1, s, a2]) * X[a1, b1] * B[b1, s, b2]
+            X = Y
+        end
+        return vec(X)
+    end
+    N = Da * Db
+    if N <= 64
+        E = zeros(Tm, N, N)
+        for k in 1:N
+            e = zeros(Tm, N)
+            e[k] = 1
+            E[:, k] = step(e)
+        end
+        vals = eigvals(E)
+        return vals[argmax(abs.(vals))]
+    end
+    vals, _, _ = eigsolve(step, ones(Tm, N), 1, :LM; tol=1e-14)
+    return vals[1]
+end
+
+"""
+    compress_mpo(W; cutoff=1e-14)
+
+Remove redundant bond dimension from an [`iMPO`](@ref).
+
+`W` is treated as an iMPS in operator space (physical leg `d_out · d_in`) and
+brought to canonical form; operator Schmidt values below `cutoff` (relative to
+a unit Hilbert-Schmidt norm per cell) are dropped. The complex scale per cell
+is restored afterwards, so the result represents the same operator, not just
+the same operator up to normalization. If no bond shrinks, `W` itself is
+returned unchanged.
+
+This is meant for exact (lossless up to `cutoff`) compression, e.g. after a
+product of MPOs. It assumes the operator, viewed as a state, is injective.
+"""
+function compress_mpo(W::iMPO; cutoff::Real=MPO_CUTOFF)
+    all(==(1), bonddims(W)) && return W
+    T = promote_type(eltype(W), Float64)
+    dims = [(size(A, 2), size(A, 3)) for A in W.W]
+    Γs = [reshape(Array{T}(A), size(A, 1), size(A, 2) * size(A, 3), size(A, 4)) for A in W.W]
+    ψ = iMPS(copy(Γs), [ones(real(T), size(A, 3)) for A in Γs], W.n)
+    _canonical_truncate!(ψ; maxdim=typemax(Int), cutoff, truncerr=0.0, renormalize=true)
+    newdims = [length(λ) for λ in ψ.λ]
+    all(newdims .>= bonddims(W)) && return W
+    z = _mixed_cell_eigenvalue(ψ.Γ, Γs)
+    out = [reshape(Array{T}(ψ.Γ[i]), size(ψ.Γ[i], 1), dims[i]..., size(ψ.Γ[i], 3)) for i in 1:W.n]
+    out[1] .*= T <: Real ? real(z) : z
+    return iMPO(out, W.n)
+end
+
+"""
+    mpo_multiply(A, B; compress=true, cutoff=1e-14)
+    A * B
+
+Operator product `A · B` of two [`iMPO`](@ref)s (`B` acts first). The result
+has cell length `lcm(A.n, B.n)` and bond dimensions multiply. With
+`compress=true` (the default, also used by `*`) the product is passed through
+[`compress_mpo`](@ref) at the stated `cutoff`, which for instance turns
+`U_A(dt/2) * U_A(dt/2)` back into a bond-dimension-2 representation of
+`U_A(dt)`.
+"""
+function mpo_multiply(A::iMPO, B::iMPO; compress::Bool=true, cutoff::Real=MPO_CUTOFF)
+    m = lcm(A.n, B.n)
+    W = Vector{Array{promote_type(eltype(A), eltype(B)),4}}(undef, m)
+    for i in 1:m
+        size(A[i], 3) == size(B[i], 2) || throw(DimensionMismatch(
+            "site $i: A has input dimension $(size(A[i], 3)) but B has output dimension $(size(B[i], 2))"))
+        W[i] = _compose_site(A[i], B[i])
+    end
+    P = iMPO(W, m)
+    return compress ? compress_mpo(P; cutoff) : P
+end
+
+Base.:*(A::iMPO, B::iMPO) = mpo_multiply(A, B)
+
+#---------------------------------------------------------------------------------------------------
+# Truncation in canonical form
+#---------------------------------------------------------------------------------------------------
+function _validate_mpo_truncation(maxdim, cutoff, truncerr)
+    maxdim isa Integer && maxdim > 0 || throw(ArgumentError("maxdim must be a positive integer"))
+    isfinite(cutoff) && cutoff >= 0 || throw(ArgumentError("cutoff must be finite and non-negative"))
+    isfinite(truncerr) && truncerr >= 0 || throw(ArgumentError("truncerr must be finite and non-negative"))
+    return nothing
+end
+
+#---------------------------------------------------------------------------------------------------
+# Single-layer canonical form (Vanderstraeten, Haegeman, Verstraete, SciPost Phys. Lect. Notes 7
+# (2019), Sec. 2.3, Algorithms 1 and 2)
+#---------------------------------------------------------------------------------------------------
+# `canonical!` follows Orús and Vidal (PRB 78, 155117): it solves for the transfer fixed points
+# l, r and takes their square roots. Their eigenvalues are squared Schmidt values, so precision
+# drops to min(√ε, ε/√η) for Schmidt weights η, and the inverses of the square roots leave
+# tensors that violate orthonormality at the same order. After an MPO application the small
+# values matter. The single-layer route never forms l or r: it iterates (A_L, L) ← QRPos(L A)
+# around the cell until the seam factor L is stationary (unique by the positive diagonal),
+# accelerated by an Arnoldi step on the mixed transfer map, then does the same from the left
+# on the right-isometric chain and diagonalizes the bond centers by SVD.
+#
+# Bonds produced by an MPO often carry exact null directions. A zero pivot makes the QR
+# factor non-unique, so they are removed first by an exact re-representation of the cell:
+# a rank-revealing SVD sweep writes the cell as C₀ B₁⋯Bₙ (or A₁⋯Aₙ D₀), and absorbing the seam
+# factor into the cell gives a cell with reduced bonds for the same infinite state. Sweeps
+# alternate direction until no bond shrinks.
+
+const _ORTH_TOL = 1e-13
+const _ORTH_MAXITER = 2000
+# The seam residual has a roundoff floor of a few ε·dim. A residual that stops decreasing
+# for `_ORTH_STALL` sweeps below `_ORTH_FLOOR` is accepted as converged.
+const _ORTH_STALL = 25
+const _ORTH_FLOOR = 1e-10
+
+# Convergence bookkeeping: returns (done, best, since_best).
+function _orth_progress(δ, best, since, tol)
+    δ <= tol && return true, δ, 0
+    δ < best && return false, δ, 0
+    since += 1
+    return since >= _ORTH_STALL && best <= _ORTH_FLOOR, best, since
+end
+
+# Phases making the diagonal of a triangular factor real and non-negative. A pivot at the
+# roundoff level gets phase 1, so null directions do not stop the iteration.
+function _pivot_phases(T::AbstractMatrix)
+    p = diag(T)
+    tiny = 100 * eps(real(eltype(T))) * max(norm(T), floatmin(real(eltype(T))))
+    return [abs(x) > tiny ? x / abs(x) : one(x) for x in p]
+end
+
+# M = L Q with L lower triangular (non-negative diagonal) and Q row-orthonormal.
+function _pos_lq(M::AbstractMatrix)
+    F = lq(M)
+    L = Matrix(F.L)
+    Q = Matrix(F.Q)
+    ph = _pivot_phases(L)
+    L .*= transpose(conj.(ph))
+    Q .*= ph
+    return L, Q
+end
+
+# M = Q R with R upper triangular (non-negative diagonal) and Q column-orthonormal.
+function _pos_qr(M::AbstractMatrix)
+    F = qr(M)
+    k = min(size(M)...)
+    Q = Matrix(F.Q)[:, 1:k]
+    R = Matrix(F.R)
+    ph = _pivot_phases(R)
+    R .*= conj.(ph)
+    Q .*= transpose(ph)
+    return Q, R
+end
+
+const _NULL_RTOL = 1e-14
+
+function _revealing_svd(M::AbstractMatrix, rtol)
+    F = try
+        svd(M)
+    catch err
+        err isa LAPACKException || rethrow()
+        svd(M; alg=LinearAlgebra.QRIteration())
+    end
+    k = max(1, count(>(rtol * F.S[1]), F.S))
+    return F.U[:, 1:k], F.S[1:k], F.Vt[1:k, :]
+end
+
+# One rank-revealing sweep, then the seam factor is absorbed into the cell. Returns the new
+# cell and the log of the scale removed.
+function _reduce_sweep(A, dir::Symbol, rtol)
+    n = length(A)
+    A = copy(A)
+    logc = 0.0
+    if dir === :right
+        χ = size(A[n], 3)
+        C = Matrix{eltype(A[1])}(I, χ, χ)
+        for i in n:-1:1
+            l, d, r = size(A[i])
+            U, S, Vt = _revealing_svd(reshape(reshape(A[i], l * d, r) * C, l, :), rtol)
+            A[i] = reshape(Vt, length(S), d, :)
+            nrm = norm(S)
+            logc += log(nrm)
+            C = U .* transpose(S ./ nrm)
+        end
+        l, d, r = size(A[n])            # ⋯ C₀ B₁⋯Bₙ C₀ B₁⋯ : put C₀ to the right of Bₙ
+        A[n] = reshape(reshape(A[n], l * d, r) * C, l, d, :)
+    else
+        χ = size(A[1], 1)
+        D = Matrix{eltype(A[1])}(I, χ, χ)
+        for i in 1:n
+            l, d, r = size(A[i])
+            U, S, Vt = _revealing_svd(reshape(D * reshape(A[i], l, :), size(D, 1) * d, r), rtol)
+            A[i] = reshape(U, size(D, 1), d, :)
+            nrm = norm(S)
+            logc += log(nrm)
+            D = (S ./ nrm) .* Vt
+        end
+        l, d, r = size(A[1])            # ⋯ A₁⋯Aₙ D₀ A₁⋯ : put D₀ to the left of A₁
+        A[1] = reshape(D * reshape(A[1], l, :), size(D, 1), d, :)
+    end
+    return A, logc
+end
+
+function _remove_null_directions(A; rtol=_NULL_RTOL, maxpasses=20)
+    logc = 0.0
+    dims = [size(T, 3) for T in A]
+    for _ in 1:maxpasses
+        A, c1 = _reduce_sweep(A, :right, rtol)
+        A, c2 = _reduce_sweep(A, :left, rtol)
+        logc += c1 + c2
+        new = [size(T, 3) for T in A]
+        new == dims && return A, logc
+        dims = new
+    end
+    return A, logc
+end
+
+# Right-to-left sweep: A₁⋯Aₙ C = c C' B₁⋯Bₙ with right-isometric B and lower-triangular C'.
+function _lq_sweep(A, C)
+    B = similar(A)
+    logc = 0.0
+    for i in length(A):-1:1
+        l, d, r = size(A[i])
+        L, Q = _pos_lq(reshape(reshape(A[i], l * d, r) * C, l, :))
+        B[i] = reshape(Q, l, d, :)
+        nrm = norm(L)
+        C = L ./ nrm
+        logc += log(nrm)
+    end
+    return B, C, logc
+end
+
+# Left-to-right sweep: D B₁⋯Bₙ = A₁⋯Aₙ D' with left-isometric A; returns A and the bond
+# factors (D after each site, upper triangular).
+function _qr_sweep(B, D)
+    n = length(B)
+    A = similar(B)
+    centers = Vector{Matrix{eltype(B[1])}}(undef, n)
+    for i in 1:n
+        l, d, r = size(B[i])
+        Q, R = _pos_qr(reshape(D * reshape(B[i], l, :), size(D, 1) * d, r))
+        A[i] = reshape(Q, size(D, 1), d, :)
+        D = R ./ norm(R)
+        centers[i] = D
+    end
+    return A, centers
+end
+
+# Arnoldi acceleration (Algorithm 1, line 9): one unrestarted Krylov pass for the dominant
+# eigenvector of a transfer map, started from the current factor. A Krylov pass costs tens of
+# transfer applications, and for gapped states the plain sweeps already contract by a factor
+# 0.1-0.5 per sweep (measured on PXP states, χ ≤ 128), so the pass is a fallback: it is used
+# only after `_ACCEL_AFTER` sweeps whose residual ratio exceeds `_ACCEL_RATIO` (a small
+# transfer gap), and not near the roundoff floor, where the ratio only reflects noise.
+const _ACCEL_AFTER = 10
+const _ACCEL_RATIO = 0.8
+const _ACCEL_MIN = 1e-9
+function _accelerate(map, X, δ)
+    length(X) <= 1 && return X
+    vals, vecs, info = try
+        eigsolve(map, X, 1, :LM; tol=max(δ / 10, eps()), maxiter=1,
+                 krylovdim=min(30, length(X)), ishermitian=false)
+    catch err
+        err isa Union{ArgumentError,LAPACKException,DomainError} || rethrow()
+        return X
+    end
+    isempty(vecs) && return X
+    Y = first(vecs)
+    eltype(X) <: Real && (Y = real(Y))
+    all(isfinite, Y) ? Y : X
+end
+
+# Right-isometric B with A₁⋯Aₙ C = c C B₁⋯Bₙ, C the converged seam factor.
+function _right_orthonormalize(A; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
+    χ = size(A[end], 3)
+    C = Matrix{eltype(A[1])}(I, χ, χ) ./ sqrt(χ)
+    # X ↦ Σ A X B† over the cell, whose fixed point is C (up to scale)
+    function map_for(B)
+        return X -> begin
+            for i in length(A):-1:1
+                l, d, r = size(A[i])
+                AX = reshape(reshape(A[i], l * d, r) * X, l, :)
+                X = AX * reshape(B[i], size(B[i], 1), :)'
+            end
+            X
+        end
+    end
+    B, Cn, logc = _lq_sweep(A, C)
+    δ = norm(Cn - C)
+    δprev = Inf
+    done, best, since = _orth_progress(δ, Inf, 0, tol)
+    iter = 1
+    while !done
+        iter < maxiter || error("canonical form: right orthonormalization did not converge " *
+                                "in $maxiter sweeps (residual $δ)")
+        if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
+            C = first(_pos_lq(_accelerate(map_for(B), Cn, δ)))
+            C ./= norm(C)
+        else
+            C = Cn
+        end
+        δprev = δ
+        B, Cn, logc = _lq_sweep(A, C)
+        δ = norm(Cn - C)
+        done, best, since = _orth_progress(δ, best, since, tol)
+        iter += 1
+    end
+    return B, Cn, logc
+end
+
+# Bond factors of a right-isometric chain from left orthonormalization (D B⋯ = A⋯ D).
+function _left_factors(B, D0; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
+    D = D0
+    function map_for(A)
+        return X -> begin
+            for i in eachindex(B)
+                l, d, r = size(B[i])
+                XB = reshape(X * reshape(B[i], l, :), size(X, 1) * d, r)
+                X = reshape(A[i], size(A[i], 1) * d, :)' * XB
+            end
+            X
+        end
+    end
+    A, centers = _qr_sweep(B, D)
+    δ = norm(centers[end] - D)
+    δprev = Inf
+    done, best, since = _orth_progress(δ, Inf, 0, tol)
+    iter = 1
+    while !done
+        iter < maxiter || error("canonical form: left orthonormalization did not converge " *
+                                "in $maxiter sweeps (residual $δ)")
+        if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
+            D = last(_pos_qr(_accelerate(map_for(A), centers[end], δ)))
+            D ./= norm(D)
+        else
+            D = centers[end]
+        end
+        δprev = δ
+        A, centers = _qr_sweep(B, D)
+        δ = norm(centers[end] - D)
+        done, best, since = _orth_progress(δ, best, since, tol)
+        iter += 1
+    end
+    centers[end] = D
+    return centers
+end
+
+# Schmidt-canonical form of the cell `A` in the stored convention B = Γλ.
+# Returns (tensors, spectra, log of the norm per cell).
+function _mixed_canonical(A::Vector{<:AbstractArray{<:Number,3}}; reduce::Bool=true)
+    n = length(A)
+    A, lognull = reduce ? _remove_null_directions(A) : (A, 0.0)
+    B, C, logc = _right_orthonormalize(A)
+    logc += lognull
+    k = size(B[1], 1)
+    D0 = Matrix{eltype(B[1])}(I, k, k)
+    D0 ./= norm(D0)
+    centers = _left_factors(B, D0)
+    Vs = Vector{Matrix{eltype(B[1])}}(undef, n)
+    spectra = Vector{Vector{real(eltype(B[1]))}}(undef, n)
+    for i in 1:n
+        F = svd(centers[i])
+        Vs[i] = F.V
+        spectra[i] = F.S ./ norm(F.S)
+    end
+    out = similar(B)
+    for i in 1:n
+        Vl = Vs[mod1(i - 1, n)]
+        l, d, r = size(B[i])
+        X = reshape(Vl' * reshape(B[i], l, :), :, r) * Vs[i]
+        out[i] = reshape(X, size(Vl, 2), d, size(Vs[i], 2))
+    end
+    return out, spectra, logc
+end
+
+function _precise_canonical!(ψ::DenseIMPS; renormalize::Bool=true, reduce::Bool=true)
+    T = eltype(ψ)
+    tensors, spectra, lognorm = _mixed_canonical(ψ.Γ; reduce)
+    for i in 1:ψ.n
+        ψ.Γ[i] = Array{T,3}(tensors[i])
+        ψ.λ[i] = convert(typeof(ψ.λ[i]), spectra[i])
+    end
+    renormalize || (ψ.Γ[1] .*= exp(lognorm))
+    return ψ
+end
+
+# Schmidt values below this (relative to the largest, after normalization) are numerical
+# null directions and are always dropped.
+const _NULL_FLOOR = 1e-14
+
+# Exact canonical form, then every bond keeps its own largest Schmidt values (at most
+# `maxdim`, discarded weight ≤ `truncerr`, none below `cutoff`), as Orús and Vidal truncate
+# all bonds at once. With `recanonicalize=true` the gauge is restored afterwards; otherwise
+# the sliced state is only renormalized (the next canonicalization repairs the gauge, as in
+# their scheme). Returns per-bond BondStats.
+function _canonical_truncate!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormalize,
+                              recanonicalize::Bool=true)
+    _precise_canonical!(ψ; renormalize)
+    stats = Vector{BondStat}(undef, ψ.n)
+    keep = Vector{Int}(undef, ψ.n)
+    floor = max(cutoff, _NULL_FLOOR)
+    for b in 1:ψ.n
+        c = _discarded_weight_choice(ψ.λ[b]; mindim=1, maxdim, truncerr, svd_min=floor)
+        keep[b] = c.chi_keep
+        stats[b] = BondStat(b, c.chi_req, c.chi_keep, c.discarded_weight, c.saturated,
+                            c.target_met, c.smallest_kept_sv, c.largest_discarded_sv)
+    end
+    if any(b -> keep[b] < length(ψ.λ[b]), 1:ψ.n)
+        # In canonical form the bond basis is the Schmidt basis, so keeping the leading k_b
+        # values is a slice of the two tensors next to bond b.
+        for b in 1:ψ.n
+            nb = mod1(b + 1, ψ.n)
+            k = keep[b]
+            ψ.λ[b] = ψ.λ[b][1:k]
+            ψ.Γ[b] = ψ.Γ[b][:, :, 1:k]
+            ψ.Γ[nb] = ψ.Γ[nb][1:k, :, :]
+        end
+        if recanonicalize
+            # a slice of a canonical state has no null directions left
+            _precise_canonical!(ψ; renormalize, reduce=false)
+        elseif renormalize
+            for b in 1:ψ.n
+                ψ.λ[b] ./= norm(ψ.λ[b])
+            end
+        end
+    end
+    return stats
+end
+
+function _truncation_summary(stats::AbstractVector{BondStat})
+    return (
+        bond_stats=stats,
+        max_discarded_weight=isempty(stats) ? 0.0 : maximum(s.discarded_weight for s in stats),
+        kept_dims=[s.chi_keep for s in stats],
+        num_saturated=count(s -> s.saturated, stats),
+    )
+end
+
+"""
+    truncate!(ψ::iMPS, χ; cutoff=SVDTOL, truncerr=0.0, renormalize=true, return_stats=false)
+
+Truncate every bond of `ψ` to at most `χ` Schmidt values, treating all bonds
+alike.
+
+Procedure: bring `ψ` to exact canonical form; then each bond keeps its own
+`χ` largest Schmidt values (fewer if `truncerr > 0` allows it, or if values
+fall below `cutoff`); the canonical gauge is then restored. Because no bond is
+singled out, a state that is invariant under a translation of the cell stays
+invariant (up to roundoff) — tiling a two-site state onto four sites and
+truncating gives the tiled truncated two-site state.
+
+This differs from [`truncate_unitcell!`](@ref), which groups the cell into one
+tensor and splits it bond by bond from the left (or sweeps bond by bond on
+large cells). That sequential split singles out the bonds by their order, so
+on a cell that is a repeated smaller cell it can break the repetition and seed
+a spurious cell doubling. `truncate_unitcell!` remains available unchanged.
+
+Returns `ψ`, or `(ψ, stats)` with `return_stats=true`; `stats` has fields
+`bond_stats`, `max_discarded_weight`, `kept_dims` and `num_saturated`.
+
+Example:
+```julia
+psi = rand_iMPS(ComplexF64, 2, 2, 8)
+truncate!(psi, 2)
+length.(psi.λ)      # [2, 2]
+```
+"""
+function truncate!(ψ::iMPS, χ::Integer; cutoff::Real=SVDTOL, truncerr::Real=0.0,
+                   renormalize::Bool=true, return_stats::Bool=false)
+    ψ isa DenseIMPS || throw(ArgumentError("truncate! supports dense iMPS states"))
+    _validate_mpo_truncation(χ, cutoff, truncerr)
+    stats = _canonical_truncate!(ψ; maxdim=χ, cutoff, truncerr, renormalize)
+    return return_stats ? (ψ, _truncation_summary(stats)) : ψ
+end
+
+#---------------------------------------------------------------------------------------------------
+# MPO application
+#---------------------------------------------------------------------------------------------------
+function _check_mpo_state(ψ::iMPS, W::iMPO)
+    ψ isa DenseIMPS || throw(ArgumentError("apply! supports dense iMPS states"))
+    ψ.n % W.n == 0 || throw(ArgumentError(
+        "the iMPS cell length $(ψ.n) must be a multiple of the iMPO cell length $(W.n)"))
+    for i in 1:ψ.n
+        size(W[i], 3) == size(ψ.Γ[i], 2) || throw(DimensionMismatch(
+            "site $i: iMPO input dimension $(size(W[i], 3)) but iMPS physical dimension $(size(ψ.Γ[i], 2))"))
+    end
+    if eltype(ψ) <: Real && eltype(W) <: Complex
+        throw(ArgumentError(
+            "cannot apply a complex iMPO in place to an iMPS with real element type $(eltype(ψ)); " *
+            "convert the state first with mps_promote_type(ComplexF64, ψ)"))
+    end
+    return nothing
+end
+
+"""
+    apply!(ψ, W::iMPO; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, recanonicalize=true, return_stats=false)
+
+Apply the infinite MPO `W` to `ψ` in place and truncate.
+
+The cell length of `ψ` must be a multiple of `W.n`. Each stored tensor
+`B_i = Γ_i λ_i` is contracted with `W[i]` (the bond dimensions multiply),
+after which the state is brought to exact canonical form and every bond keeps
+its own largest Schmidt values, as in [`truncate!`](@ref): at most `maxdim`,
+with discarded weight at most `truncerr` when `truncerr > 0`, and none below
+`cutoff`.
+
+`W` need not be unitary: imaginary-time layers and projectors work. With
+`renormalize=true` (the default) the result is normalized; a projector that
+annihilates the state throws.
+
+This is the procedure of Orús and Vidal (PRB 78, 155117, Sec. III): contract,
+orthonormalize, truncate all bonds at once. The orthonormalization is the
+single-layer QR iteration of Vanderstraeten, Haegeman and Verstraete (SciPost
+Phys. Lect. Notes 7, Sec. 2.3), which resolves Schmidt values to machine
+precision rather than its square root. Exact null directions of the enlarged
+bond are removed. With `recanonicalize=false` a truncated state is only
+renormalized, not regauged; the next `apply!` restores the canonical form
+anyway, so [`evolve!`](@ref) uses this for all but its last application.
+
+Returns `ψ`, or `(ψ, stats)` with `return_stats=true`. `stats` matches the
+style of [`evolve!`](@ref): `bond_stats` (one `BondStat` per bond),
+`max_discarded_weight` (fraction of the squared Schmidt weight discarded,
+maximized over bonds), `kept_dims` and `num_saturated` (bonds whose
+requested dimension exceeded `maxdim`).
+
+Example:
+```julia
+X = [0 1; 1 0]; P = [1 0; 0 0]
+W = layer_mpo([(exp(-0.1im * kron(P, X, P)), 2, 4)], 2)
+psi = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
+apply!(psi, W; maxdim=16)
+```
+"""
+function apply!(ψ::iMPS, W::iMPO; maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL,
+                truncerr::Real=0.0, renormalize::Bool=true, recanonicalize::Bool=true,
+                return_stats::Bool=false)
+    _validate_mpo_truncation(maxdim, cutoff, truncerr)
+    _check_mpo_state(ψ, W)
+    T = eltype(ψ)
+    for i in 1:ψ.n
+        B = ψ.Γ[i]
+        A = W[i]
+        @tensor C[a, l, o, b, r] := A[l, o, s, r] * B[a, s, b]
+        s = size(C)
+        ψ.Γ[i] = Array{T,3}(reshape(C, s[1] * s[2], s[3], s[4] * s[5]))
+        # Placeholder spectra with the fused (state-fastest) bond layout; only
+        # the seam entry is read by the canonicalization.
+        ψ.λ[i] = kron(ones(eltype(ψ.λ[i]), size(A, 4)), ψ.λ[i])
+    end
+    stats = _canonical_truncate!(ψ; maxdim, cutoff, truncerr, renormalize, recanonicalize)
+    return return_stats ? (ψ, _truncation_summary(stats)) : ψ
+end
+
+#---------------------------------------------------------------------------------------------------
+# Trotterized MPO evolution
+#---------------------------------------------------------------------------------------------------
+_layer_exp(h::Diagonal, scale) = Diagonal(exp.(scale .* h.diag))
+_layer_exp(h::AbstractMatrix, scale) = exp(scale * Matrix(h))
+
+"""
+    trotter_mpos(layers, dt; trotter=:second, evolution=:real, n, cutoff=1e-14, check=true, gate_map=identity)
+
+The sequence of layer MPOs for one Trotter step of length `dt`.
+
+`layers` has the same shape as for [`trotter_gates`](@ref): each layer is a
+list of local terms `(h, i, j)` whose overlapping terms commute. The supports
+follow the convention of [`layer_mpo`](@ref) (`i ≤ j` may span more than the
+cell `n`). The stage schedule and time prefactors are those of
+`trotter_gates` (`_trotter_stage_schedule`, `_trotter_time_prefactor`), so
+`:second` gives `[U_1(dt/2), U_2(dt/2), …, U_m(dt), …, U_1(dt/2)]` and
+`:fourth`/`:fourth_opt` their real-time compositions. Each stage becomes
+`layer_mpo([(exp(c·h), i, j) …], n)` with `c = -i·coeff·dt` for
+`evolution=:real` and `c = -coeff·dt` for `evolution=:imaginary`.
+
+With `check=true`, each layer's terms are checked with
+[`check_commuting`](@ref) once (commuting terms give commuting gates).
+
+`gate_map` is applied to every exponentiated gate before it is split into an
+MPO, e.g. `gate_map = G -> P3 * G` folds a blockade projector `P3` into each
+gate. The mapped gates must still commute where they overlap (with
+`check=true` they are checked again).
+
+Returns a `Vector{iMPO}`; apply it with
+`evolve!(ψ, mpos, steps)`, which merges the half steps at step boundaries.
+
+Example:
+```julia
+X = [0 1; 1 0]; P = [1 0; 0 0]; nn = [0 0; 0 1]; I2 = [1 0; 0 1]
+h(c) = kron(P, X, P) + c * kron(I2, nn, I2)
+layers = [[(h(1.2), 2, 4)], [(h(0.6), 1, 3)]]   # A = site 1, B = site 2
+U = trotter_mpos(layers, 0.05; n=2)             # [U_A(dt/2), U_B(dt), U_A(dt/2)]
+```
+"""
+function trotter_mpos(layers, dt::Real; trotter::Symbol=:second, evolution::Symbol=:real,
+                      n::Integer, cutoff::Real=MPO_CUTOFF, check::Bool=true,
+                      d::Union{Nothing,Integer}=nothing, gate_map=identity)
+    isfinite(dt) || throw(ArgumentError("dt must be finite"))
+    _validate_trotter_scheme(length(layers), trotter)
+    _validate_trotter_evolution(trotter, evolution)
+    if check
+        for layer in layers
+            check_commuting(layer; n, d)
+        end
+    end
+    stages = _trotter_stage_schedule(length(layers), trotter, 1)
+    cache = Dict{Tuple{Int,Float64},iMPO}()
+    mpos = iMPO[]
+    for (k, coeff) in stages
+        W = get!(cache, (k, Float64(coeff))) do
+            scale = _trotter_time_prefactor(dt, coeff, evolution)
+            gates = [(gate_map(_layer_exp(h, scale)), i, j) for (h, i, j) in layers[k]]
+            layer_mpo(gates, n; cutoff, check=check && gate_map !== identity, d)
+        end
+        push!(mpos, W)
+    end
+    T = mapreduce(eltype, promote_type, mpos)
+    return [W isa iMPO{T} ? W : iMPO([Array{T,4}(A) for A in W.W], W.n) for W in mpos]
+end
+
+# Accept a merged boundary MPO only if it is no larger than the parts.
+function _merged_boundary(last_mpo::iMPO, first_mpo::iMPO)
+    last_mpo.n == first_mpo.n || return nothing
+    merged = mpo_multiply(last_mpo, first_mpo; compress=true)
+    bound = max.(bonddims(last_mpo), bonddims(first_mpo))
+    merged.n == last_mpo.n && all(bonddims(merged) .<= bound) || return nothing
+    return merged
+end
+
+"""
+    evolve!(ψ, mpos::Vector{<:iMPO}, steps; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, merge=true, return_stats=false)
+
+Apply the MPO sequence `mpos` (one Trotter step, e.g. from
+[`trotter_mpos`](@ref)) `steps` times with [`apply!`](@ref), truncating after
+every MPO. Intermediate truncated states are renormalized but not regauged
+(the next application does that); the returned state is canonical.
+
+Half-step merging: with `merge=true` and `steps > 1`, the last MPO of a step
+and the first MPO of the next step (for `:second`, `U_A(dt/2) U_A(dt/2)`) are
+multiplied and compressed once with [`compress_mpo`](@ref). The merged MPO is
+used at every interior step boundary if its bond dimensions do not exceed
+those of the two factors (exact for commuting layer MPOs, giving `U_A(dt)`);
+otherwise the two are applied separately. Merging removes one MPO
+application and one truncation per step, like the boundary merges of
+`evolve!(ψ, layers, dt, steps)`.
+
+Returns `ψ`, or `(ψ, stats)` with `return_stats=true`: `updates` (the stats
+of each [`apply!`](@ref)), `max_discarded_weight`, `mean_discarded_weight`,
+`max_kept_dim` and `num_saturated` over all bonds of all applications.
+
+Example:
+```julia
+X = [0 1; 1 0]; P = [1 0; 0 0]
+layers = [[(kron(P, X, P), 2, 4)], [(kron(P, X, P), 1, 3)]]
+U = trotter_mpos(layers, 0.05; n=2)
+psi = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
+evolve!(psi, U, 20; maxdim=16)
+```
+"""
+function evolve!(ψ::iMPS, mpos::AbstractVector{<:iMPO}, steps::Integer;
+                 maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL, truncerr::Real=0.0,
+                 renormalize::Bool=true, merge::Bool=true, return_stats::Bool=false)
+    steps >= 0 || throw(ArgumentError("steps must be non-negative"))
+    _validate_mpo_truncation(maxdim, cutoff, truncerr)
+    isempty(mpos) && return return_stats ? (ψ, _aggregate_mpo_stats(Any[])) : ψ
+    foreach(W -> _check_mpo_state(ψ, W), mpos)
+    k = length(mpos)
+    merged = merge && k >= 2 && steps >= 2 ? _merged_boundary(mpos[end], mpos[1]) : nothing
+    sequence = if isnothing(merged)
+        Iterators.flatten(Iterators.repeated(mpos, steps))
+    else
+        interior = view(mpos, 2:k-1)
+        Iterators.flatten((view(mpos, 1:k-1),
+                           Iterators.flatten(Iterators.repeated(Iterators.flatten(((merged,), interior)), steps - 1)),
+                           (mpos[end],)))
+    end
+    updates = return_stats ? Any[] : nothing
+    total = isnothing(merged) ? k * steps : (k - 1) * steps + 1
+    for (j, W) in enumerate(sequence)
+        # Intermediate truncations are only renormalized: the next application
+        # recanonicalizes anyway. The final state is returned in canonical form.
+        last = j == total
+        _, st = apply!(ψ, W; maxdim, cutoff, truncerr, renormalize, recanonicalize=last,
+                       return_stats=true)
+        return_stats && push!(updates, st)
+    end
+    return return_stats ? (ψ, _aggregate_mpo_stats(updates)) : ψ
+end
+
+function _aggregate_mpo_stats(updates)
+    all_stats = BondStat[]
+    for u in updates
+        append!(all_stats, u.bond_stats)
+    end
+    w = [s.discarded_weight for s in all_stats]
+    return (
+        updates=updates,
+        max_discarded_weight=isempty(w) ? 0.0 : maximum(w),
+        mean_discarded_weight=isempty(w) ? 0.0 : sum(w) / length(w),
+        max_kept_dim=isempty(all_stats) ? 0 : maximum(s.chi_keep for s in all_stats),
+        num_saturated=count(s -> s.saturated, all_stats),
+    )
+end
+
+#---------------------------------------------------------------------------------------------------
+# Site-dependent energies and energy fixing
+#---------------------------------------------------------------------------------------------------
+"""
+    energy_density(ψ, terms; n=ψ.n)
+
+Energy per site of the site-dependent local terms `terms`, a list of
+`(h, i, j)` that is repeated with period `n` (the support convention of
+[`layer_mpo`](@ref): `i ≤ j` may span more than the cell).
+
+`ψ.n` must be a multiple of `n`. The result is
+`(1 / ψ.n) · ∑_{translates within ψ's cell} ∑_terms ⟨h⟩`; for a two-site PXP
+cell with `terms = [(h_A, 2, 4), (h_B, 1, 3)]` this is `(⟨h_A⟩ + ⟨h_B⟩) / 2`.
+`ψ` must be in canonical form (as returned by `canonical!`, `apply!`,
+`truncate!`, …).
+
+This complements `energy_density(ψ, h)`, which averages one density `h` over
+all sites.
+"""
+function energy_density(ψ::iMPS, terms::AbstractVector; n::Integer=ψ.n)
+    ψ.n % n == 0 || throw(ArgumentError("ψ.n = $(ψ.n) must be a multiple of the term period n = $n"))
+    E = 0.0
+    for (h, i, j) in terms
+        a, b, _, _ = _support_span(h, i, j, n, size(ψ.Γ[1], 2))
+        for shift in 0:n:(ψ.n - 1)
+            inds = [mod1(k + shift, ψ.n) for k in a:b]
+            O = _operator_to_internal(h, Int[size(ψ.Γ[k], 2) for k in inds])
+            E += _expect_internal(ψ, O, inds)
+        end
+    end
+    return E / ψ.n
+end
+
+# A list of layers or a flat list of terms → (layers, terms).
+function _layers_and_terms(x, n, d)
+    items = collect(x)
+    isempty(items) && throw(ArgumentError("no Hamiltonian terms given"))
+    if first(items) isa Tuple
+        terms = items
+        return _auto_layers(terms, n, d), terms
+    end
+    layers = [collect(l) for l in items]
+    return layers, reduce(vcat, layers)
+end
+
+# Greedy split of terms into layers that satisfy the layer_mpo precondition.
+function _auto_layers(terms, n, d)
+    layers = Vector{Any}[]
+    for t in terms
+        placed = false
+        for layer in layers
+            candidate = vcat(layer, [t])
+            ok = try
+                _bond_crossings_ok(candidate, n, d) && check_commuting(candidate; n, d)
+            catch err
+                err isa ArgumentError || rethrow()
+                false
+            end
+            if ok
+                push!(layer, t)
+                placed = true
+                break
+            end
+        end
+        placed || push!(layers, Any[t])
+    end
+    return layers
+end
+
+function _bond_crossings_ok(terms, n, d)
+    crossed = falses(n)
+    for (G, i, j) in terms
+        a, b, L, _ = _support_span(G, i, j, n, d)
+        for p in 1:L-1
+            c = mod1(a + p - 1, n)
+            crossed[c] && return false
+            crossed[c] = true
+        end
+    end
+    return true
+end
+
+"""
+    energy_fix!(ψ, terms_or_layers, χ; target, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n, cutoff=SVDTOL)
+
+Move the energy per site of `ψ` toward `target` with short imaginary-time
+steps built as layer MPOs from site-dependent terms.
+
+`terms_or_layers` is either a list of commuting layers (as for
+[`trotter_mpos`](@ref)) or a flat list of terms `(h, i, j)`, which is split
+greedily into layers that satisfy the [`layer_mpo`](@ref) precondition. The
+terms are repeated with period `n`, and the energy is measured with
+`energy_density(ψ, terms; n)`.
+
+The step rule is that of [`fix_energy!`](@ref): start with
+`dτ = alpha · (E − target)`; each trial applies a second-order imaginary-time
+step `trotter_mpos(layers, dτ; evolution=:imaginary)` truncated to `χ`. A
+trial that reduces `|E − target|` is accepted and the next `dτ` is predicted
+from the measured slope (growth clamped to a factor 2); a rejected trial is
+discarded and `dτ` halved. `ψ` always holds the best state found. Each term is
+shifted by a constant before exponentiation, which changes nothing after
+normalization but keeps the gates bounded.
+
+Returns `(converged, residual, steps)`: whether `|E − target| ≤ tol` was
+reached, the final `E − target` of the state left in `ψ`, and the number of
+trials. It does not warn; check `converged`.
+"""
+function energy_fix!(ψ::iMPS, terms_or_layers, χ::Integer; target::Real, tol::Real=1e-6,
+                     alpha::Real=0.1, maxstep::Integer=50, n::Integer=ψ.n,
+                     cutoff::Real=SVDTOL, d::Union{Nothing,Integer}=nothing)
+    isfinite(target) || throw(ArgumentError("target must be finite"))
+    isfinite(tol) && tol > 0 || throw(ArgumentError("tol must be finite and positive"))
+    isfinite(alpha) && alpha >= 0 || throw(ArgumentError("alpha must be finite and nonnegative"))
+    maxstep >= 0 || throw(ArgumentError("maxstep must be nonnegative"))
+    _validate_mpo_truncation(χ, cutoff, 0.0)
+    dd = isnothing(d) ? size(ψ.Γ[1], 2) : d
+    layers, terms = _layers_and_terms(terms_or_layers, n, dd)
+    for (h, _, _) in terms
+        ishermitian(h) || throw(ArgumentError("energy_fix! requires Hermitian terms"))
+    end
+    for layer in layers
+        check_commuting(layer; n, d=dd)
+    end
+    spectra = IdDict{Any,Tuple{Float64,Float64}}()
+    for (h, _, _) in terms
+        get!(spectra, h) do
+            v = eigvals(Hermitian(Matrix(h)))
+            (Float64(first(v)), Float64(last(v)))
+        end
+    end
+    measure(state) = energy_density(state, terms; n)
+    residual = measure(ψ) - target
+    steps = 0
+    if abs(residual) <= tol || maxstep == 0 || iszero(alpha)
+        return (converged=abs(residual) <= tol, residual, steps)
+    end
+    eltype(ψ) <: Real && throw(ArgumentError("energy_fix! needs a complex iMPS; use mps_promote_type"))
+    trial = deepcopy(ψ)
+    dτ = alpha * residual
+    while steps < maxstep && isfinite(dτ) && !iszero(dτ)
+        shifted = [[(h - (dτ > 0 ? spectra[h][1] : spectra[h][2]) * I, i, j) for (h, i, j) in layer]
+                   for layer in layers]
+        for W in trotter_mpos(shifted, dτ; evolution=:imaginary, n, check=false, d=dd)
+            apply!(trial, W; maxdim=χ, cutoff)
+        end
+        attempted = measure(trial) - target
+        steps += 1
+        if abs(attempted) < abs(residual)
+            _copy_imps_state!(ψ, trial)
+            abs(attempted) <= tol && return (converged=true, residual=attempted, steps)
+            dτ *= clamp(attempted / (residual - attempted), -2, 2)
+            residual = attempted
+        else
+            _copy_imps_state!(trial, ψ)
+            dτ /= 2
+        end
+    end
+    return (converged=false, residual, steps)
+end
+
+#---------------------------------------------------------------------------------------------------
+# ScarFinder step with MPOs
+#---------------------------------------------------------------------------------------------------
+"""
+    per_site_fidelity(ψ1, ψ2)
+
+`|⟨ψ1|ψ2⟩|^(1/n)` per site for two normalized iMPS with the same cell length
+`n`, from the dominant eigenvalue of the mixed cell transfer matrix.
+"""
+function per_site_fidelity(ψ1::iMPS, ψ2::iMPS)
+    ψ1.n == ψ2.n || throw(ArgumentError("per_site_fidelity needs equal cell lengths"))
+    return inner_product(ψ1, ψ2; tol=1e-14)^(1 / ψ1.n)
+end
+export per_site_fidelity
+
+"""
+    scarfinder_step!(ψ, mpos::Vector{<:iMPO}, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n=first(mpos).n)
+
+One ScarFinder iteration with layer MPOs:
+
+1. `evolve!(ψ, mpos, nstep; maxdim, cutoff)` (half steps merged),
+2. [`truncate!`](@ref)`(ψ, χ)` — every bond treated alike,
+3. if `target` is given, [`energy_fix!`](@ref)`(ψ, terms, χ; target, …)`.
+
+Returns `(loss, energy_error, converged)`:
+- `loss = -log F` with `F` the per-site fidelity between the state before and
+  after the truncation of step 2 ([`per_site_fidelity`](@ref));
+- `energy_error`: `E − target` after step 3, or `nothing` without `target`;
+- `converged`: whether the energy fix met `tol` (`true` without `target`).
+
+`terms` (site-dependent `(h, i, j)`, or layers) is required with `target`, and
+is repeated with period `n`.
+
+Example (see the README for the staggered PXP chain):
+```julia
+loss, err = scarfinder_step!(psi, U, 2; nstep=20, maxdim=16, terms, target=e)
+```
+"""
+function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integer;
+                          nstep::Integer=10, maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL,
+                          terms=nothing, target::Union{Nothing,Real}=nothing,
+                          tol::Real=1e-6, alpha::Real=0.1, maxstep::Integer=50,
+                          n::Integer=isempty(mpos) ? ψ.n : first(mpos).n)
+    _validate_mpo_truncation(χ, cutoff, 0.0)
+    !isnothing(target) && isnothing(terms) &&
+        throw(ArgumentError("supply `terms` when setting `target`"))
+    _warn_scarfinder_nstep(nstep, :gate)
+    evolve!(ψ, mpos, nstep; maxdim, cutoff)
+    before = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
+    truncate!(ψ, χ; cutoff)
+    F = per_site_fidelity(before, ψ)
+    loss = -log(min(F, 1.0))
+    isnothing(target) && return (loss=loss, energy_error=nothing, converged=true)
+    result = energy_fix!(ψ, terms, χ; target, tol, alpha, maxstep, n, cutoff)
+    return (loss=loss, energy_error=result.residual, converged=result.converged)
+end

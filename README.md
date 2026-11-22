@@ -32,6 +32,7 @@ conditions, and canonicalization assumes an injective iMPS throughout. For finit
 | 🧩 **Infinite matrix-product states** | Arbitrary periodic unit cells, represented directly in the thermodynamic limit. |
 | 🌀 **Local-gate evolution** | `applygate!` / `evolve!` with a discarded-weight truncation controller. |
 | ⏱️ **Trotter helpers** | Second-order Strang splitting and two fourth-order schemes (`trotter_gates`). |
+| 🧱 **Layer MPOs** | Exact infinite MPOs of commuting gate layers (`layer_mpo`, `trotter_mpos`, `apply!`), so three-site terms run on a two-site cell. |
 | 📐 **Schmidt canonicalization** | Injective-setting canonical form via `canonical!`. |
 | 📊 **Transfer-matrix observables** | Overlaps, multi-site expectation values, entanglement entropy, and energy density. |
 | 🎯 **ScarFinder search** | Low-entanglement trajectories via Hamiltonian, gate, and mixed interfaces (`scarfinder!`). |
@@ -143,6 +144,49 @@ complete PXP example.
 </details>
 
 <details>
+<summary><b>Layer MPOs: three-site terms on a two-site cell</b></summary>
+
+<br>
+
+Gate-by-gate iTEBD needs a cell at least as long as the gates, and truncating a cell that is a
+repeated smaller cell is not symmetric under that repetition. For a Hamiltonian split into layers
+whose overlapping terms commute (e.g. PXP terms by the parity of their centre), each layer is an
+exact infinite MPO with a short cell. For PXP its bond dimension is 2: a gate flips the centre
+only if both neighbours are empty.
+
+```julia
+using InfiniteTEBD, LinearAlgebra
+X = [0 1; 1 0]; P = [1 0; 0 0]; n = [0 0; 0 1]; I2 = Matrix(1.0I, 2, 2)
+P3 = Diagonal([!(((s>>2)&1==1 && (s>>1)&1==1) || ((s>>1)&1==1 && s&1==1)) for s in 0:7])
+h(c) = kron(P, X, P) + c * kron(I2, n, I2)
+mu, delta = 0.9, 0.3
+# Two-site cell, site 1 = A, site 2 = B. Supports (i, j) with i ≤ j are chain sites and may be
+# longer than the cell: the term centred on c spans (c-1, c, c+1).
+layers = [[(h(mu + delta), 2, 4)],   # centred on A: sites 2, 3, 4 = cell sites 2, 1, 2
+          [(h(mu - delta), 1, 3)]]   # centred on B: sites 1, 2, 3 = cell sites 1, 2, 1
+U = trotter_mpos(layers, 0.05; n=2, gate_map=G -> P3 * G)  # [U_A(dt/2), U_B(dt), U_A(dt/2)]
+bonddims.(U)                                               # [[2, 2], [2, 2], [2, 2]]
+
+psi = product_iMPS(ComplexF64, [[cos(0.35), sin(0.35)], [cos(0.35), sin(0.35)]])
+apply!(psi, layer_mpo([(I - kron(n, n), 1, 2), (I - kron(n, n), 2, 3)], 2))  # blockade
+terms = reduce(vcat, layers)
+e = energy_density(psi, terms)
+for k in 1:30                      # coarse stage, ΔT = 1
+    scarfinder_step!(psi, U, 2; nstep=20, maxdim=16, terms, target=e)
+end
+for k in 1:400                     # fine stage, ΔT = 0.1
+    loss, err = scarfinder_step!(psi, U, 2; nstep=2, maxdim=16, terms, target=e)
+end
+```
+
+`evolve!(psi, U, steps)` merges `U_A(dt/2) U_A(dt/2)` at step boundaries, `truncate!` keeps the
+`χ` largest Schmidt values on every bond alike, and `energy_fix!` corrects the energy with
+imaginary-time layer MPOs of the same site-dependent terms. See
+[Layer MPOs](https://jayren3996.github.io/InfiniteTEBD.jl/dev/layer-mpo/).
+
+</details>
+
+<details>
 <summary><b>Abelian-symmetric tensors via TensorKit</b></summary>
 
 <br>
@@ -169,6 +213,7 @@ Full documentation lives at
 - [States and Canonical Form](https://jayren3996.github.io/InfiniteTEBD.jl/dev/imps/) — the storage convention, `canonical!`, runnable examples.
 - [Symmetric infinite MPS](https://jayren3996.github.io/InfiniteTEBD.jl/dev/symmetries/) — Abelian U(1)/Zₙ tensors via the TensorKit extension.
 - [Time Evolution](https://jayren3996.github.io/InfiniteTEBD.jl/dev/time-evolution/) — `applygate!`, `evolve!`, Trotter order, adaptive bond dimension.
+- [Layer MPOs](https://jayren3996.github.io/InfiniteTEBD.jl/dev/layer-mpo/) — exact MPOs of commuting gate layers, `apply!`, `truncate!`, site-dependent energy fixing.
 - [Observables](https://jayren3996.github.io/InfiniteTEBD.jl/dev/observables/) — overlaps, expectation values, entropy, energy density.
 - [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) — the three interfaces, the two time scales, the PXP example.
 - [API Reference](https://jayren3996.github.io/InfiniteTEBD.jl/dev/api/) — generated from docstrings.

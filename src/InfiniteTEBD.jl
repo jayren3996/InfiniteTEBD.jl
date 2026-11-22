@@ -26,6 +26,7 @@ include("Schmidt.jl")
 include("Krylov.jl")
 include("Miscellaneous.jl")
 include("ScarFinder.jl")
+include("MPO.jl")
 include("SymmetricStubs.jl")
 
 #---------------------------------------------------------------------------------------------------

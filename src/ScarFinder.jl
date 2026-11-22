@@ -166,6 +166,10 @@ Notes:
   which preserves their nonzero singular spectra and avoids fusing two
   physical legs. Gauge restoration also works site by site and requires an
   injective state on the retained bonds.
+- Both paths split the cell bond by bond in a fixed order, so the bonds are
+  not treated alike. On a cell that repeats a smaller cell this can break the
+  repetition (a spurious cell doubling). [`truncate!`](@ref) instead keeps the
+  `χ` largest Schmidt values of the canonical form on every bond.
 """
 function truncate_unitcell!(ψ::iMPS, χ::Integer; cutoff::Real=SVDTOL,
                             recanonicalize::Bool=false)
