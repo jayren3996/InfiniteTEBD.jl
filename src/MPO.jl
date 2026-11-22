@@ -2,14 +2,44 @@
 # INFINITE MPO
 #---------------------------------------------------------------------------------------------------
 export iMPO, bonddims, layer_mpo, check_commuting, compress_mpo, mpo_multiply
-export apply!, trotter_mpos, truncate!, energy_fix!
+export apply!, trotter_mpos, truncate!, energy_fix!, constraint_leakage, MPOAnnihilationError
 
 # ITensorMPS (a dependency) already owns and exports a generic `truncate!`.
 # Extending it keeps `using InfiniteTEBD, ITensorMPS` free of a name clash.
 import ITensorMPS: truncate!
 
+"""
+    MPOAnnihilationError
+
+Thrown by [`apply!`](@ref) (and the MPO [`evolve!`](@ref)) when the MPO maps the
+state to zero, i.e. to a norm per cell at the roundoff level of the contraction. The state passed to `apply!` is left unchanged. A search can catch this
+type to tell "candidate excluded by a projector" apart from a solver failure.
+"""
+struct MPOAnnihilationError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::MPOAnnihilationError) = print(io, "MPOAnnihilationError: ", e.msg)
+
 """Default relative singular-value cutoff used when splitting gates into MPOs."""
 const MPO_CUTOFF::Float64 = 1e-14
+
+"""
+    ControlledCenter
+
+Structure of a two-site-cell layer of three-site gates whose outer sites are
+controls: every gate on `(control, center, control)` has the form
+`G = Σ_{a,b} |a⟩⟨a| ⊗ M[:, :, a, b] ⊗ |b⟩⟨b|`, i.e. it is diagonal in the two
+outer occupations. Examples are PXP gates `exp(-i dt (P X P + c n))`, with or
+without the blockade projector `P3` folded in, and their imaginary-time
+versions. [`layer_mpo`](@ref) detects this structure and stores it in the
+[`iMPO`](@ref); [`apply!`](@ref) then uses a sector-resolved update (see the
+"Layer MPOs" manual page). Internal; only `control`, `center` and `M` are read.
+"""
+struct ControlledCenter
+    control::Int
+    center::Int
+    M::Array{ComplexF64,4}     # M[s_out, s_in, a, b]
+end
 
 """
     iMPO{T}
@@ -42,8 +72,12 @@ bonddims(W)                          # [1]
 struct iMPO{T<:Number}
     W::Vector{Array{T,4}}
     n::Int
+    # Optional layer structure retained from construction (`nothing` for general MPOs,
+    # products and compressed MPOs). Only used to select a faster, equivalent update.
+    structure::Union{Nothing,ControlledCenter}
 
-    function iMPO(W::Vector{Array{T,4}}, n::Integer) where {T<:Number}
+    function iMPO(W::Vector{Array{T,4}}, n::Integer,
+                  structure::Union{Nothing,ControlledCenter}=nothing) where {T<:Number}
         n > 0 || throw(ArgumentError("iMPO unit-cell length n must be positive (got $n)"))
         length(W) == n || throw(ArgumentError("iMPO: length(W) = $(length(W)) but n = $n"))
         for i in 1:n
@@ -53,7 +87,7 @@ struct iMPO{T<:Number}
                 "size(W[$j], 1) = $(size(W[j], 1))"))
             all(isfinite, W[i]) || throw(ArgumentError("iMPO tensor W[$i] contains non-finite values"))
         end
-        return new{T}(W, Int(n))
+        return new{T}(W, Int(n), structure)
     end
 end
 
@@ -66,7 +100,7 @@ end
 Base.eltype(::iMPO{T}) where {T} = T
 Base.length(W::iMPO) = W.n
 Base.getindex(W::iMPO, i::Integer) = W.W[mod1(i, W.n)]
-Base.copy(W::iMPO) = iMPO([copy(A) for A in W.W], W.n)
+Base.copy(W::iMPO) = iMPO([copy(A) for A in W.W], W.n, W.structure)
 
 """
     bonddims(W::iMPO)
@@ -252,7 +286,7 @@ function _compose_site(P::AbstractArray{<:Number,4}, W::AbstractArray{<:Number,4
 end
 
 """
-    layer_mpo(layer, n; cutoff=1e-14, check=true, d=nothing)
+    layer_mpo(layer, n; cutoff=1e-14, check=true, d=nothing, structured=true)
 
 Build the exact infinite MPO of one commuting layer of local gates, repeated
 with period `n`.
@@ -289,6 +323,13 @@ gate across that bond, and the MPO equals the product of all gates exactly
 
 Returns an [`iMPO`](@ref) with cell length `n`.
 
+Structure: with `structured=true`, a layer of one three-site gate on a
+two-site cell (local dimension 2) that is diagonal in its two outer sites —
+PXP-type gates, with or without a folded blockade projector, real or imaginary
+time — is recorded as a `ControlledCenter` in the returned MPO.
+[`apply!`](@ref) then uses an equivalent sector-resolved update (much faster
+for PXP); all other layers, and `structured=false`, use the generic update.
+
 Example (PXP: each gate flips the centre only if both neighbours are empty, so
 the operator Schmidt rank is 2 on every bond):
 ```julia
@@ -299,7 +340,7 @@ bonddims(W)                     # [2, 2]
 ```
 """
 function layer_mpo(layer, n::Integer; cutoff::Real=MPO_CUTOFF, check::Bool=true,
-                   d::Union{Nothing,Integer}=nothing)
+                   d::Union{Nothing,Integer}=nothing, structured::Bool=true)
     n > 0 || throw(ArgumentError("unit-cell length n must be positive"))
     isfinite(cutoff) && cutoff >= 0 || throw(ArgumentError("cutoff must be finite and non-negative"))
     terms = collect(layer)
@@ -340,7 +381,7 @@ function layer_mpo(layer, n::Integer; cutoff::Real=MPO_CUTOFF, check::Bool=true,
         end
         W[c] = site
     end
-    return iMPO(W, n)
+    return iMPO(W, n, structured ? _detect_controlled_center(terms, n, dd) : nothing)
 end
 
 #---------------------------------------------------------------------------------------------------
@@ -394,7 +435,7 @@ function compress_mpo(W::iMPO; cutoff::Real=MPO_CUTOFF)
     dims = [(size(A, 2), size(A, 3)) for A in W.W]
     Γs = [reshape(Array{T}(A), size(A, 1), size(A, 2) * size(A, 3), size(A, 4)) for A in W.W]
     ψ = iMPS(copy(Γs), [ones(real(T), size(A, 3)) for A in Γs], W.n)
-    _canonical_truncate!(ψ; maxdim=typemax(Int), cutoff, truncerr=0.0, renormalize=true)
+    _canonical_truncate!(ψ; maxdim=typemax(Int), cutoff, truncerr=0.0, renormalize=true)[1]
     newdims = [length(λ) for λ in ψ.λ]
     all(newdims .>= bonddims(W)) && return W
     z = _mixed_cell_eigenvalue(ψ.Γ, Γs)
@@ -516,6 +557,13 @@ function _revealing_svd(M::AbstractMatrix, rtol)
     return F.U[:, 1:k], F.S[1:k], F.Vt[1:k, :]
 end
 
+function _checked_norm(S)
+    nrm = norm(S)
+    isfinite(nrm) || throw(ArgumentError("canonical form: non-finite tensor entries"))
+    nrm > 0 || throw(MPOAnnihilationError("the state has zero norm (the MPO annihilates it)"))
+    return nrm
+end
+
 # One rank-revealing sweep, then the seam factor is absorbed into the cell. Returns the new
 # cell and the log of the scale removed.
 function _reduce_sweep(A, dir::Symbol, rtol)
@@ -529,7 +577,7 @@ function _reduce_sweep(A, dir::Symbol, rtol)
             l, d, r = size(A[i])
             U, S, Vt = _revealing_svd(reshape(reshape(A[i], l * d, r) * C, l, :), rtol)
             A[i] = reshape(Vt, length(S), d, :)
-            nrm = norm(S)
+            nrm = _checked_norm(S)
             logc += log(nrm)
             C = U .* transpose(S ./ nrm)
         end
@@ -542,7 +590,7 @@ function _reduce_sweep(A, dir::Symbol, rtol)
             l, d, r = size(A[i])
             U, S, Vt = _revealing_svd(reshape(D * reshape(A[i], l, :), size(D, 1) * d, r), rtol)
             A[i] = reshape(U, size(D, 1), d, :)
-            nrm = norm(S)
+            nrm = _checked_norm(S)
             logc += log(nrm)
             D = (S ./ nrm) .* Vt
         end
@@ -566,35 +614,65 @@ function _remove_null_directions(A; rtol=_NULL_RTOL, maxpasses=20)
     return A, logc
 end
 
+# The sweeps only need the triangular factors; the isometries are needed for the Arnoldi
+# map and for the converged output. Each sweep therefore keeps the Householder
+# factorizations (`lq!`/`qr!` on the freshly formed products) and the pivot phases, and the
+# isometries are formed on demand from exactly those factorizations, with the same phase
+# rule as `_pos_lq`/`_pos_qr`. This roughly halves the allocations of a canonicalization.
+
 # Right-to-left sweep: A₁⋯Aₙ C = c C' B₁⋯Bₙ with right-isometric B and lower-triangular C'.
+# Returns the factorizations (for `_right_isometries`), C' and log c.
 function _lq_sweep(A, C)
-    B = similar(A)
+    packs = Vector{Any}(undef, length(A))
     logc = 0.0
     for i in length(A):-1:1
         l, d, r = size(A[i])
-        L, Q = _pos_lq(reshape(reshape(A[i], l * d, r) * C, l, :))
-        B[i] = reshape(Q, l, d, :)
-        nrm = norm(L)
+        F = lq!(reshape(reshape(A[i], l * d, r) * C, l, :))
+        L = Matrix(F.L)
+        ph = _pivot_phases(L)
+        L .*= transpose(conj.(ph))
+        nrm = _checked_norm(L)
         C = L ./ nrm
         logc += log(nrm)
+        packs[i] = (F, ph, l, d)
     end
-    return B, C, logc
+    return packs, C, logc
 end
 
-# Left-to-right sweep: D B₁⋯Bₙ = A₁⋯Aₙ D' with left-isometric A; returns A and the bond
-# factors (D after each site, upper triangular).
+function _right_isometries(packs)
+    return map(packs) do (F, ph, l, d)
+        Q = Matrix(F.Q)
+        Q .*= ph
+        reshape(Q, l, d, :)
+    end
+end
+
+# Left-to-right sweep: D B₁⋯Bₙ = A₁⋯Aₙ D' with left-isometric A. Returns the
+# factorizations (for `_left_isometries`) and the bond factors (D after each site).
 function _qr_sweep(B, D)
     n = length(B)
-    A = similar(B)
+    packs = Vector{Any}(undef, n)
     centers = Vector{Matrix{eltype(B[1])}}(undef, n)
     for i in 1:n
         l, d, r = size(B[i])
-        Q, R = _pos_qr(reshape(D * reshape(B[i], l, :), size(D, 1) * d, r))
-        A[i] = reshape(Q, size(D, 1), d, :)
+        m = size(D, 1)
+        F = qr!(reshape(D * reshape(B[i], l, :), m * d, r))
+        R = Matrix(F.R)
+        ph = _pivot_phases(R)
+        R .*= conj.(ph)
         D = R ./ norm(R)
         centers[i] = D
+        packs[i] = (F, ph, m, d, min(m * d, r))
     end
-    return A, centers
+    return packs, centers
+end
+
+function _left_isometries(packs)
+    return map(packs) do (F, ph, m, d, k)
+        Q = Matrix(F.Q)[:, 1:k]
+        Q .*= transpose(ph)
+        reshape(Q, m, d, :)
+    end
 end
 
 # Arnoldi acceleration (Algorithm 1, line 9): one unrestarted Krylov pass for the dominant
@@ -636,7 +714,7 @@ function _right_orthonormalize(A; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
             X
         end
     end
-    B, Cn, logc = _lq_sweep(A, C)
+    packs, Cn, logc = _lq_sweep(A, C)
     δ = norm(Cn - C)
     δprev = Inf
     done, best, since = _orth_progress(δ, Inf, 0, tol)
@@ -645,18 +723,18 @@ function _right_orthonormalize(A; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
         iter < maxiter || error("canonical form: right orthonormalization did not converge " *
                                 "in $maxiter sweeps (residual $δ)")
         if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
-            C = first(_pos_lq(_accelerate(map_for(B), Cn, δ)))
+            C = first(_pos_lq(_accelerate(map_for(_right_isometries(packs)), Cn, δ)))
             C ./= norm(C)
         else
             C = Cn
         end
         δprev = δ
-        B, Cn, logc = _lq_sweep(A, C)
+        packs, Cn, logc = _lq_sweep(A, C)
         δ = norm(Cn - C)
         done, best, since = _orth_progress(δ, best, since, tol)
         iter += 1
     end
-    return B, Cn, logc
+    return _right_isometries(packs), Cn, logc
 end
 
 # Bond factors of a right-isometric chain from left orthonormalization (D B⋯ = A⋯ D).
@@ -672,7 +750,7 @@ function _left_factors(B, D0; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
             X
         end
     end
-    A, centers = _qr_sweep(B, D)
+    packs, centers = _qr_sweep(B, D)
     δ = norm(centers[end] - D)
     δprev = Inf
     done, best, since = _orth_progress(δ, Inf, 0, tol)
@@ -681,13 +759,13 @@ function _left_factors(B, D0; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
         iter < maxiter || error("canonical form: left orthonormalization did not converge " *
                                 "in $maxiter sweeps (residual $δ)")
         if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
-            D = last(_pos_qr(_accelerate(map_for(A), centers[end], δ)))
+            D = last(_pos_qr(_accelerate(map_for(_left_isometries(packs)), centers[end], δ)))
             D ./= norm(D)
         else
             D = centers[end]
         end
         δprev = δ
-        A, centers = _qr_sweep(B, D)
+        packs, centers = _qr_sweep(B, D)
         δ = norm(centers[end] - D)
         done, best, since = _orth_progress(δ, best, since, tol)
         iter += 1
@@ -732,7 +810,7 @@ function _precise_canonical!(ψ::DenseIMPS; renormalize::Bool=true, reduce::Bool
         ψ.λ[i] = convert(typeof(ψ.λ[i]), spectra[i])
     end
     renormalize || (ψ.Γ[1] .*= exp(lognorm))
-    return ψ
+    return lognorm
 end
 
 # Schmidt values below this (relative to the largest, after normalization) are numerical
@@ -743,20 +821,35 @@ const _NULL_FLOOR = 1e-14
 # `maxdim`, discarded weight ≤ `truncerr`, none below `cutoff`), as Orús and Vidal truncate
 # all bonds at once. With `recanonicalize=true` the gauge is restored afterwards; otherwise
 # the sliced state is only renormalized (the next canonicalization repairs the gauge, as in
-# their scheme). Returns per-bond BondStats.
+# their scheme). Returns (per-bond BondStats, log norm per cell of the input, whether any
+# bond was sliced).
 function _canonical_truncate!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormalize,
                               recanonicalize::Bool=true)
-    _precise_canonical!(ψ; renormalize)
+    lognorm = _precise_canonical!(ψ; renormalize)
+    stats, sliced = _truncate_canonical!(ψ; maxdim, cutoff, truncerr, renormalize, recanonicalize)
+    return stats, lognorm, sliced
+end
+
+# Per-bond truncation of a state already in exact canonical form (shared by the generic
+# and the structured MPO updates, so both truncate identically).
+function _truncate_canonical!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormalize,
+                              recanonicalize::Bool=true)
     stats = Vector{BondStat}(undef, ψ.n)
     keep = Vector{Int}(undef, ψ.n)
     floor = max(cutoff, _NULL_FLOOR)
     for b in 1:ψ.n
         c = _discarded_weight_choice(ψ.λ[b]; mindim=1, maxdim, truncerr, svd_min=floor)
         keep[b] = c.chi_keep
-        stats[b] = BondStat(b, c.chi_req, c.chi_keep, c.discarded_weight, c.saturated,
+        # Requested dimension and saturation count only Schmidt values at or above the floor:
+        # values the cutoff removes anyway do not make `maxdim` binding. (Their number depends
+        # on how null directions were removed, so counting them would make the statistic
+        # representation-dependent.)
+        chi_req = min(c.chi_req, max(1, count(>=(floor), ψ.λ[b])))
+        stats[b] = BondStat(b, chi_req, c.chi_keep, c.discarded_weight, chi_req > maxdim,
                             c.target_met, c.smallest_kept_sv, c.largest_discarded_sv)
     end
-    if any(b -> keep[b] < length(ψ.λ[b]), 1:ψ.n)
+    sliced = any(b -> keep[b] < length(ψ.λ[b]), 1:ψ.n)
+    if sliced
         # In canonical form the bond basis is the Schmidt basis, so keeping the leading k_b
         # values is a slice of the two tensors next to bond b.
         for b in 1:ψ.n
@@ -775,11 +868,12 @@ function _canonical_truncate!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormali
             end
         end
     end
-    return stats
+    return stats, sliced
 end
 
-function _truncation_summary(stats::AbstractVector{BondStat})
+function _truncation_summary(stats::AbstractVector{BondStat}; path::Symbol=:generic)
     return (
+        path=path,
         bond_stats=stats,
         max_discarded_weight=isempty(stats) ? 0.0 : maximum(s.discarded_weight for s in stats),
         kept_dims=[s.chi_keep for s in stats],
@@ -820,7 +914,7 @@ function truncate!(ψ::iMPS, χ::Integer; cutoff::Real=SVDTOL, truncerr::Real=0.
                    renormalize::Bool=true, return_stats::Bool=false)
     ψ isa DenseIMPS || throw(ArgumentError("truncate! supports dense iMPS states"))
     _validate_mpo_truncation(χ, cutoff, truncerr)
-    stats = _canonical_truncate!(ψ; maxdim=χ, cutoff, truncerr, renormalize)
+    stats = _canonical_truncate!(ψ; maxdim=χ, cutoff, truncerr, renormalize)[1]
     return return_stats ? (ψ, _truncation_summary(stats)) : ψ
 end
 
@@ -844,7 +938,7 @@ function _check_mpo_state(ψ::iMPS, W::iMPO)
 end
 
 """
-    apply!(ψ, W::iMPO; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, recanonicalize=true, return_stats=false)
+    apply!(ψ, W::iMPO; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, recanonicalize=true, return_stats=false, structured=true)
 
 Apply the infinite MPO `W` to `ψ` in place and truncate.
 
@@ -856,23 +950,41 @@ with discarded weight at most `truncerr` when `truncerr > 0`, and none below
 `cutoff`.
 
 `W` need not be unitary: imaginary-time layers and projectors work. With
-`renormalize=true` (the default) the result is normalized; a projector that
-annihilates the state throws.
+`renormalize=true` (the default) the result is normalized.
+
+Failure handling: the update is computed on new arrays and committed only on
+success, so if `apply!` throws, `ψ` is unchanged. An MPO that annihilates the
+state throws [`MPOAnnihilationError`](@ref): `W·ψ` is treated as zero when its
+norm per cell, relative to the input's, is at the roundoff level of the
+contraction (`≈ 10⁴ ε ∏ᵢ ‖Wᵢ‖`).
 
 This is the procedure of Orús and Vidal (PRB 78, 155117, Sec. III): contract,
 orthonormalize, truncate all bonds at once. The orthonormalization is the
 single-layer QR iteration of Vanderstraeten, Haegeman and Verstraete (SciPost
 Phys. Lect. Notes 7, Sec. 2.3), which resolves Schmidt values to machine
 precision rather than its square root. Exact null directions of the enlarged
-bond are removed. With `recanonicalize=false` a truncated state is only
-renormalized, not regauged; the next `apply!` restores the canonical form
-anyway, so [`evolve!`](@ref) uses this for all but its last application.
+bond are removed. With `recanonicalize=false` a truncated state is not
+regauged: the tensors are not in canonical form and the stored `λ` are only
+the sliced spectra, so Schmidt-gauge observables (`expect`, `ent_S`) are not
+reliable until the next `apply!`, `truncate!` or `canonical!`. With
+`renormalize=true` the state is still normalized per cell (the transfer-matrix
+norm is divided out). [`evolve!`](@ref) skips that normalization in all but
+its last application, since the next application canonicalizes anyway.
+
+Structured update: if `W` carries a controlled-center structure (see
+[`layer_mpo`](@ref)), `structured=true`, the state is a dense complex two-site
+cell and `renormalize=true`, the update is computed sector by sector over the
+control occupations instead of from the enlarged MPO×MPS. It is the same
+state, truncated by the same code; it falls back to the generic update if its
+iteration does not converge or anything fails numerically. `stats.path`
+reports which update ran (`:controlled` or `:generic`).
 
 Returns `ψ`, or `(ψ, stats)` with `return_stats=true`. `stats` matches the
-style of [`evolve!`](@ref): `bond_stats` (one `BondStat` per bond),
+style of [`evolve!`](@ref): `path`, `bond_stats` (one `BondStat` per bond),
 `max_discarded_weight` (fraction of the squared Schmidt weight discarded,
-maximized over bonds), `kept_dims` and `num_saturated` (bonds whose
-requested dimension exceeded `maxdim`).
+maximized over bonds), `kept_dims` and `num_saturated` (bonds where `maxdim`
+removed Schmidt values at or above the truncation floor `max(cutoff, 1e-14)`;
+values the cutoff removes anyway are not counted).
 
 Example:
 ```julia
@@ -884,22 +996,77 @@ apply!(psi, W; maxdim=16)
 """
 function apply!(ψ::iMPS, W::iMPO; maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL,
                 truncerr::Real=0.0, renormalize::Bool=true, recanonicalize::Bool=true,
-                return_stats::Bool=false)
-    _validate_mpo_truncation(maxdim, cutoff, truncerr)
-    _check_mpo_state(ψ, W)
+                return_stats::Bool=false, structured::Bool=true)
+    stats, path = _apply_mpo!(ψ, W; maxdim, cutoff, truncerr, renormalize, recanonicalize,
+                              normalize_cells=true, structured)
+    return return_stats ? (ψ, _truncation_summary(stats; path)) : ψ
+end
+
+# W·ψ as a new iMPS (fused bond index: state index fastest). `ψ` is not modified.
+function _contract_mpo(ψ::DenseIMPS, W::iMPO)
     T = eltype(ψ)
+    Γ = Vector{Array{T,3}}(undef, ψ.n)
+    λ = similar(ψ.λ)
     for i in 1:ψ.n
         B = ψ.Γ[i]
         A = W[i]
         @tensor C[a, l, o, b, r] := A[l, o, s, r] * B[a, s, b]
         s = size(C)
-        ψ.Γ[i] = Array{T,3}(reshape(C, s[1] * s[2], s[3], s[4] * s[5]))
-        # Placeholder spectra with the fused (state-fastest) bond layout; only
-        # the seam entry is read by the canonicalization.
-        ψ.λ[i] = kron(ones(eltype(ψ.λ[i]), size(A, 4)), ψ.λ[i])
+        Γ[i] = Array{T,3}(reshape(C, s[1] * s[2], s[3], s[4] * s[5]))
+        # Placeholder spectra with the fused bond layout (only their sizes are used).
+        λ[i] = kron(ones(eltype(ψ.λ[i]), size(A, 4)), ψ.λ[i])
     end
-    stats = _canonical_truncate!(ψ; maxdim, cutoff, truncerr, renormalize, recanonicalize)
-    return return_stats ? (ψ, _truncation_summary(stats)) : ψ
+    return iMPS(Γ, λ, ψ.n)
+end
+
+# W·ψ counts as annihilated when its norm per cell, relative to ψ's, is at the roundoff
+# level of the contraction, ~ε·∏ᵢ‖Wᵢ‖ (with a safety factor). A projector can leave
+# tensors of order one whose cell transfer matrix is nilpotent; the canonical form of such
+# a cell is built from roundoff, so the norm, not the tensors, has to decide.
+const _ANNIHILATION_MARGIN = 1e4
+
+function _annihilation_threshold(ψ, W::iMPO)
+    return log(_ANNIHILATION_MARGIN * eps(Float64)) +
+           sum(log(max(norm(W[i]), floatmin(Float64))) for i in 1:ψ.n)
+end
+
+# `lognorm`: log norm per cell of W·ψ (unnormalized input scale). True if annihilated.
+function _annihilated(lognorm, ψ, W::iMPO)
+    threshold = _annihilation_threshold(ψ, W)
+    lognorm >= threshold + 40 && return false           # far above: skip the norm of ψ
+    return lognorm - log(inner_product(ψ)) / 2 < threshold
+end
+
+# Transactional MPO application. `normalize_cells=false` skips the per-cell normalization of
+# an unregauged truncated state (used inside `evolve!`, where the next application
+# canonicalizes anyway).
+function _apply_mpo!(ψ::iMPS, W::iMPO; maxdim, cutoff, truncerr, renormalize, recanonicalize,
+                     normalize_cells::Bool, structured::Bool=true)
+    _validate_mpo_truncation(maxdim, cutoff, truncerr)
+    _check_mpo_state(ψ, W)
+    res = structured && _controlled_eligible(ψ, W, renormalize) ?
+        _apply_controlled(ψ, W.structure; maxdim, cutoff, truncerr, renormalize, recanonicalize) :
+        nothing
+    if isnothing(res)
+        path = :generic
+        trial = _contract_mpo(ψ, W)
+        stats, lognorm, sliced = _canonical_truncate!(trial; maxdim, cutoff, truncerr, renormalize,
+                                                      recanonicalize)
+    else
+        path = :controlled
+        trial, stats, lognorm, sliced = res
+    end
+    _annihilated(lognorm, ψ, W) && throw(MPOAnnihilationError(
+        "the MPO maps the state to zero (norm per cell at the roundoff level)"))
+    if sliced && !recanonicalize && renormalize && normalize_cells
+        η = inner_product(trial)
+        isfinite(η) && η > 0 && (trial.Γ[1] ./= sqrt(η))
+    end
+    for i in 1:ψ.n
+        ψ.Γ[i] = trial.Γ[i]
+        ψ.λ[i] = trial.λ[i]
+    end
+    return stats, path
 end
 
 #---------------------------------------------------------------------------------------------------
@@ -965,25 +1132,31 @@ function trotter_mpos(layers, dt::Real; trotter::Symbol=:second, evolution::Symb
         push!(mpos, W)
     end
     T = mapreduce(eltype, promote_type, mpos)
-    return [W isa iMPO{T} ? W : iMPO([Array{T,4}(A) for A in W.W], W.n) for W in mpos]
+    return [W isa iMPO{T} ? W : iMPO([Array{T,4}(A) for A in W.W], W.n, W.structure) for W in mpos]
 end
 
-# Accept a merged boundary MPO only if it is no larger than the parts.
+# Accept a merged boundary MPO only if it is no larger than the parts. In time order
+# `last_mpo` (end of one step) acts before `first_mpo` (start of the next), so the merged
+# operator is first_mpo · last_mpo.
 function _merged_boundary(last_mpo::iMPO, first_mpo::iMPO)
     last_mpo.n == first_mpo.n || return nothing
-    merged = mpo_multiply(last_mpo, first_mpo; compress=true)
+    merged = mpo_multiply(first_mpo, last_mpo; compress=true)
     bound = max.(bonddims(last_mpo), bonddims(first_mpo))
     merged.n == last_mpo.n && all(bonddims(merged) .<= bound) || return nothing
-    return merged
+    structure = _merged_structure(first_mpo.structure, last_mpo.structure)
+    return isnothing(structure) ? merged : iMPO(merged.W, merged.n, structure)
 end
 
 """
-    evolve!(ψ, mpos::Vector{<:iMPO}, steps; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, merge=true, return_stats=false)
+    evolve!(ψ, mpos::Vector{<:iMPO}, steps; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, merge=true, return_stats=false, structured=true)
 
 Apply the MPO sequence `mpos` (one Trotter step, e.g. from
 [`trotter_mpos`](@ref)) `steps` times with [`apply!`](@ref), truncating after
-every MPO. Intermediate truncated states are renormalized but not regauged
-(the next application does that); the returned state is canonical.
+every MPO. Intermediate truncated states are not regauged (the next
+application does that); the returned state is canonical and normalized. Each
+application is transactional, so if one throws (e.g.
+[`MPOAnnihilationError`](@ref)), `ψ` holds the state after the last
+successful application.
 
 Half-step merging: with `merge=true` and `steps > 1`, the last MPO of a step
 and the first MPO of the next step (for `:second`, `U_A(dt/2) U_A(dt/2)`) are
@@ -996,7 +1169,9 @@ application and one truncation per step, like the boundary merges of
 
 Returns `ψ`, or `(ψ, stats)` with `return_stats=true`: `updates` (the stats
 of each [`apply!`](@ref)), `max_discarded_weight`, `mean_discarded_weight`,
-`max_kept_dim` and `num_saturated` over all bonds of all applications.
+`max_kept_dim` and `num_saturated` over all bonds of all applications, and
+`num_structured`, the number of applications that used the structured update.
+`structured=true` allows it (see [`apply!`](@ref)).
 
 Example:
 ```julia
@@ -1009,7 +1184,8 @@ evolve!(psi, U, 20; maxdim=16)
 """
 function evolve!(ψ::iMPS, mpos::AbstractVector{<:iMPO}, steps::Integer;
                  maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL, truncerr::Real=0.0,
-                 renormalize::Bool=true, merge::Bool=true, return_stats::Bool=false)
+                 renormalize::Bool=true, merge::Bool=true, return_stats::Bool=false,
+                 structured::Bool=true)
     steps >= 0 || throw(ArgumentError("steps must be non-negative"))
     _validate_mpo_truncation(maxdim, cutoff, truncerr)
     isempty(mpos) && return return_stats ? (ψ, _aggregate_mpo_stats(Any[])) : ψ
@@ -1030,9 +1206,9 @@ function evolve!(ψ::iMPS, mpos::AbstractVector{<:iMPO}, steps::Integer;
         # Intermediate truncations are only renormalized: the next application
         # recanonicalizes anyway. The final state is returned in canonical form.
         last = j == total
-        _, st = apply!(ψ, W; maxdim, cutoff, truncerr, renormalize, recanonicalize=last,
-                       return_stats=true)
-        return_stats && push!(updates, st)
+        st, path = _apply_mpo!(ψ, W; maxdim, cutoff, truncerr, renormalize, recanonicalize=last,
+                               normalize_cells=false, structured)
+        return_stats && push!(updates, _truncation_summary(st; path))
     end
     return return_stats ? (ψ, _aggregate_mpo_stats(updates)) : ψ
 end
@@ -1049,6 +1225,7 @@ function _aggregate_mpo_stats(updates)
         mean_discarded_weight=isempty(w) ? 0.0 : sum(w) / length(w),
         max_kept_dim=isempty(all_stats) ? 0 : maximum(s.chi_keep for s in all_stats),
         num_saturated=count(s -> s.saturated, all_stats),
+        num_structured=count(u -> u.path === :controlled, updates),
     )
 end
 
@@ -1161,7 +1338,8 @@ trials. It does not warn; check `converged`.
 """
 function energy_fix!(ψ::iMPS, terms_or_layers, χ::Integer; target::Real, tol::Real=1e-6,
                      alpha::Real=0.1, maxstep::Integer=50, n::Integer=ψ.n,
-                     cutoff::Real=SVDTOL, d::Union{Nothing,Integer}=nothing)
+                     cutoff::Real=SVDTOL, d::Union{Nothing,Integer}=nothing,
+                     structured::Bool=true)
     isfinite(target) || throw(ArgumentError("target must be finite"))
     isfinite(tol) && tol > 0 || throw(ArgumentError("tol must be finite and positive"))
     isfinite(alpha) && alpha >= 0 || throw(ArgumentError("alpha must be finite and nonnegative"))
@@ -1195,7 +1373,7 @@ function energy_fix!(ψ::iMPS, terms_or_layers, χ::Integer; target::Real, tol::
         shifted = [[(h - (dτ > 0 ? spectra[h][1] : spectra[h][2]) * I, i, j) for (h, i, j) in layer]
                    for layer in layers]
         for W in trotter_mpos(shifted, dτ; evolution=:imaginary, n, check=false, d=dd)
-            apply!(trial, W; maxdim=χ, cutoff)
+            apply!(trial, W; maxdim=χ, cutoff, structured)
         end
         attempted = measure(trial) - target
         steps += 1
@@ -1228,43 +1406,134 @@ end
 export per_site_fidelity
 
 """
-    scarfinder_step!(ψ, mpos::Vector{<:iMPO}, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n=first(mpos).n)
+    constraint_leakage(ψ, P::iMPO)
+
+Per-site leakage of `ψ` out of the subspace of the projector MPO `P`:
+`−log F_P` with `F_P = |⟨ψ|φ⟩|^(1/n)` the per-site fidelity between `ψ` and its
+normalized projection `φ = P|ψ⟩/‖P|ψ⟩‖`. For a projector this is
+`−log(⟨ψ|P|ψ⟩) / (2n)` per cell of `n` sites, the same normalization as the
+ScarFinder `loss`, so the two can be compared directly. Returns `Inf` if `P`
+annihilates `ψ`. `ψ` is not modified.
+
+`P` must be a projector (e.g. the blockade `∏(1 − n_j n_{j+1})` built with
+[`layer_mpo`](@ref)); the formula is not meaningful for other operators. The
+projection is computed without truncation.
+"""
+function constraint_leakage(ψ::iMPS, P::iMPO)
+    _check_mpo_state(ψ, P)
+    φ = _contract_mpo(ψ, P)
+    lognorm = try
+        last(_mixed_canonical(φ.Γ))
+    catch err
+        err isa MPOAnnihilationError || rethrow()
+        return Inf
+    end
+    _annihilated(lognorm, ψ, P) && return Inf
+    lognorm_in = log(inner_product(ψ)) / 2
+    return max(-(lognorm - lognorm_in) / ψ.n, 0.0)
+end
+
+"""
+    scarfinder_step!(ψ, mpos::Vector{<:iMPO}, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n=first(mpos).n, constraint=nothing, structured=true, evolve_truncerr=0.0)
 
 One ScarFinder iteration with layer MPOs:
 
 1. `evolve!(ψ, mpos, nstep; maxdim, cutoff)` (half steps merged),
-2. [`truncate!`](@ref)`(ψ, χ)` — every bond treated alike,
+2. [`truncate!`](@ref)`(ψ, χ)` — the final projection, every bond treated alike,
 3. if `target` is given, [`energy_fix!`](@ref)`(ψ, terms, χ; target, …)`.
 
-Returns `(loss, energy_error, converged)`:
-- `loss = -log F` with `F` the per-site fidelity between the state before and
-  after the truncation of step 2 ([`per_site_fidelity`](@ref));
-- `energy_error`: `E − target` after step 3, or `nothing` without `target`;
+Returns a named tuple. The first three fields are unchanged from earlier
+versions, so `loss, err = scarfinder_step!(…)` still works:
+
+- `loss`: `−log F` per site, `F` the per-site fidelity between the states just
+  before and just after the final projection (step 2) — measured **before**
+  energy correction. This is the ranking quantity; it is not changed by the
+  other fields.
+- `energy_error`: `E − target` after step 3, or `nothing` without `target`.
 - `converged`: whether the energy fix met `tol` (`true` without `target`).
+
+Diagnostics of the evolution window (step 1), over its `apply!` calls:
+
+- `evolve_max_discarded`: **maximum**, over all MPO applications and all bonds,
+  of the discarded fraction of squared Schmidt weight.
+- `evolve_discarded_sum`: **sum** over the MPO applications of the per-application
+  maximum over bonds — a rough proxy for the truncation accumulated in the window.
+- `evolve_saturated`: **sum** over the applications of the number of bonds where
+  `maxdim` removed Schmidt values at or above the truncation floor.
+
+The loss only measures the final projection if the window itself was resolved:
+when `maxdim` is close to `χ`, the intermediate truncations already project the
+state and `loss` can be ≈ 0 for every candidate. As a rule of thumb, trust a
+loss only when `evolve_discarded_sum ≪ loss`; otherwise increase `maxdim`.
+
+Constraint diagnostics, with `constraint = P` a projector [`iMPO`](@ref) (e.g. the
+PXP blockade), from [`constraint_leakage`](@ref) (per site, same normalization as
+`loss`; `nothing` without `constraint`):
+
+- `leakage_evolved`: after the evolution window, before the final projection.
+- `leakage_projected`: after the final projection, **before** energy correction.
+- `leakage_fixed`: after energy correction (`nothing` without `target`).
+
+A projector folded into the evolution (e.g. `gate_map = G -> P3 * G`) removes the
+leaked weight in the next window and renormalizes, so that weight is not part of
+`loss`.
+
+- `energy_fix_steps`: number of energy-correction trials (`0` without `target`).
+- `evolve_structured`: how many of the window's MPO applications used the
+  sector-resolved controlled-layer update (the rest used the generic update).
+
+Options:
+- `structured=true`: allow the sector-resolved update for layers that carry a
+  controlled-center structure (see [`layer_mpo`](@ref)); `false` forces the
+  generic update everywhere, including the energy correction.
+- `evolve_truncerr=0.0`: per-bond discarded-weight target for the real-time
+  window only (passed to `evolve!` as `truncerr`). Opt-in: a positive value lets
+  bonds shrink below `maxdim` when the Schmidt tail is small, which is faster but
+  changes the approximation (the final projection and the energy correction
+  are unaffected). It is a per-update, per-bond target, not a bound on the
+  error accumulated over the window; check `evolve_discarded_sum` and compare
+  losses against `evolve_truncerr=0` before relying on it.
 
 `terms` (site-dependent `(h, i, j)`, or layers) is required with `target`, and
 is repeated with period `n`.
 
 Example (see the README for the staggered PXP chain):
 ```julia
-loss, err = scarfinder_step!(psi, U, 2; nstep=20, maxdim=16, terms, target=e)
+r = scarfinder_step!(psi, U, 2; nstep=20, maxdim=16, terms, target=e, constraint=blockade)
+r.loss, r.evolve_discarded_sum, r.leakage_projected
 ```
 """
 function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integer;
                           nstep::Integer=10, maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL,
                           terms=nothing, target::Union{Nothing,Real}=nothing,
                           tol::Real=1e-6, alpha::Real=0.1, maxstep::Integer=50,
-                          n::Integer=isempty(mpos) ? ψ.n : first(mpos).n)
+                          n::Integer=isempty(mpos) ? ψ.n : first(mpos).n,
+                          constraint::Union{Nothing,iMPO}=nothing, structured::Bool=true,
+                          evolve_truncerr::Real=0.0)
     _validate_mpo_truncation(χ, cutoff, 0.0)
     !isnothing(target) && isnothing(terms) &&
         throw(ArgumentError("supply `terms` when setting `target`"))
     _warn_scarfinder_nstep(nstep, :gate)
-    evolve!(ψ, mpos, nstep; maxdim, cutoff)
+    _, est = evolve!(ψ, mpos, nstep; maxdim, cutoff, truncerr=evolve_truncerr, return_stats=true,
+                     structured)
+    leak(state) = isnothing(constraint) ? nothing : constraint_leakage(state, constraint)
+    leakage_evolved = leak(ψ)
     before = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
     truncate!(ψ, χ; cutoff)
     F = per_site_fidelity(before, ψ)
     loss = -log(min(F, 1.0))
-    isnothing(target) && return (loss=loss, energy_error=nothing, converged=true)
-    result = energy_fix!(ψ, terms, χ; target, tol, alpha, maxstep, n, cutoff)
-    return (loss=loss, energy_error=result.residual, converged=result.converged)
+    leakage_projected = leak(ψ)
+    energy_error, converged, steps, leakage_fixed = nothing, true, 0, nothing
+    if !isnothing(target)
+        result = energy_fix!(ψ, terms, χ; target, tol, alpha, maxstep, n, cutoff, structured)
+        energy_error, converged, steps = result.residual, result.converged, result.steps
+        leakage_fixed = leak(ψ)
+    end
+    return (loss=loss, energy_error=energy_error, converged=converged,
+            evolve_max_discarded=est.max_discarded_weight,
+            evolve_discarded_sum=sum((u.max_discarded_weight for u in est.updates); init=0.0),
+            evolve_saturated=est.num_saturated,
+            evolve_structured=est.num_structured,
+            leakage_evolved=leakage_evolved, leakage_projected=leakage_projected,
+            leakage_fixed=leakage_fixed, energy_fix_steps=steps)
 end

@@ -27,6 +27,7 @@ include("Krylov.jl")
 include("Miscellaneous.jl")
 include("ScarFinder.jl")
 include("MPO.jl")
+include("ControlledLayer.jl")
 include("SymmetricStubs.jl")
 
 #---------------------------------------------------------------------------------------------------

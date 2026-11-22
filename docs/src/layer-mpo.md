@@ -96,6 +96,30 @@ merges the last MPO of one step with the first of the next
 (`U_A(dt/2) U_A(dt/2) = U_A(dt)`) through [`mpo_multiply`](@ref) and
 [`compress_mpo`](@ref), when the merged MPO is no larger.
 
+## Fast path for PXP-type layers
+
+A PXP gate is controlled by its two neighbours: it acts on the center only
+through blocks `M_ab` labelled by the outer occupations `a, b`
+(`G = Σ_ab |a⟩⟨a| ⊗ M_ab ⊗ |b⟩⟨b|`). With `P3` folded in, `M_00` is the 2×2
+gate `exp(−i dt (X + c n))` and every other block keeps only the empty center.
+[`layer_mpo`](@ref) recognizes such layers (one three-site gate on a two-site
+cell, local dimension 2, diagonal in the outer sites) and stores the blocks in
+the MPO. [`apply!`](@ref) then factorizes each occupation block of the control
+tensor, so the control site becomes a block identity, builds the center tensor
+from the blocks `M_ab`, and runs the same QR/LQ canonicalization with the
+control-site factorizations split by sector, starting from the input Schmidt
+data. The result is the same state as the generic update, truncated by the same
+code (agreement to ~1e-13 in Schmidt values and ~1e-15 in fidelity in the
+tests); for the PXP ScarFinder benchmark it is several times faster.
+
+The fast path is used for dense complex two-site cells with `renormalize=true`,
+including inputs that leak out of the blockade and intermediate states that
+were not regauged. It falls back to the generic update otherwise, if its
+iteration does not converge, or on any numerical failure; `stats.path`
+(`apply!`), `num_structured` (`evolve!`) and `evolve_structured`
+(`scarfinder_step!`) report which update ran. Pass `structured=false` to force
+the generic update.
+
 ## Truncation and ScarFinder
 
 [`truncate!`](@ref) is the bond-symmetric truncation: canonical form, then

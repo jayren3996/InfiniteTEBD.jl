@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `evolve!` with MPOs merged step boundaries in the wrong order (`last·first`
+  instead of `first·last`). Schedules from `trotter_mpos` were unaffected (their
+  first and last layers coincide); user sequences with different end layers
+  were wrong.
+- `per_site_fidelity` / `inner_product` of two different states could converge
+  to a wrong eigenvalue of the mixed transfer matrix when the states differed by
+  a virtual gauge (identity Krylov seed); mixed transfers now start from a fixed
+  unstructured seed.
+- `apply!` is transactional: on failure the input is unchanged. A projector that
+  annihilates the state throws `MPOAnnihilationError` (including cells whose
+  tensors are nonzero but whose transfer matrix is nilpotent) instead of a LAPACK
+  error or a state built from roundoff.
+- `apply!(…; renormalize=true, recanonicalize=false)` now normalizes the state,
+  not only the stored spectra.
+
+### Added
+
+- Sector-resolved update for controlled-center layers (PXP-type gates on a
+  two-site cell, detected by `layer_mpo`, used by `apply!`/`evolve!`/
+  `scarfinder_step!`/`energy_fix!`; `structured=false` forces the generic path).
+- `scarfinder_step!` diagnostics: `evolve_max_discarded`, `evolve_discarded_sum`,
+  `evolve_saturated`, `evolve_structured`, `leakage_evolved`,
+  `leakage_projected`, `leakage_fixed`, `energy_fix_steps`; options
+  `constraint` and `evolve_truncerr` (opt-in). `constraint_leakage`.
+
+### Changed
+
+- The generic canonicalization forms the QR/LQ isometries only when needed
+  (bit-identical results, fewer allocations).
+- MPO-path saturation statistics count only Schmidt values at or above the
+  truncation floor `max(cutoff, 1e-14)` (`chi_req`, `saturated`, `num_saturated`).
+
 ## 0.3.0
 
 Layer MPOs and ScarFinder building blocks. The existing API is unchanged.

@@ -238,6 +238,15 @@ function _dominant_chain_eigenvalue(
     @inbounds for i in 1:min(χR_T2, χR_T1)
         seed[i, i] = one(T)
     end
+    if T1s !== T2s
+        # For two different states the (rectangular) identity can lie in an invariant
+        # subspace of the mixed transfer that excludes its dominant eigenvector, e.g. when
+        # the states differ by a sign gauge on the virtual bond; Arnoldi then converges,
+        # with a small residual, to the wrong eigenvalue. A fixed, reproducible
+        # unstructured component removes that structure. The self-transfer keeps the
+        # identity, which is its fixed point in canonical form.
+        _add_unstructured_seed!(seed)
+    end
 
     apply_cell = _chain_transfer_action(T1s, T2s; dir=:r)
     f = ρ -> vec(apply_cell(reshape(ρ, χR_T2, χR_T1)))
@@ -252,6 +261,21 @@ function _dominant_chain_eigenvalue(
         return _dominant_eigenvalue_dense(gtrm(T1s, T2s); tol, maxiter)
     end
     return abs(vals[1])
+end
+
+# Deterministic quasi-random entries (no RNG state), same magnitude as the identity part.
+function _add_unstructured_seed!(seed::AbstractMatrix{T}) where {T}
+    m, n = size(seed)
+    @inbounds for j in 1:n, i in 1:m
+        x = sin(1.0 + 1.6180339887 * i + 2.7182818285 * j + 0.5772156649 * i * j)
+        if T <: Complex
+            y = cos(0.5 + 2.2360679775 * i + 1.4142135624 * j + 0.3183098862 * i * j)
+            seed[i, j] += T(x, y) / 2
+        else
+            seed[i, j] += T(x) / 2
+        end
+    end
+    return seed
 end
 
 function _dominant_eigenvalue_dense(

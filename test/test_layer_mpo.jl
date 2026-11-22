@@ -163,3 +163,53 @@ end
     @test energy_density(ψ4, [(hA, 2, 4), (hB, 1, 3)]; n=2) ≈
           (expect(ψ4, hA, 2, 4) + expect(ψ4, hA, 4, 2) + expect(ψ4, hB, 1, 3) + expect(ψ4, hB, 3, 1)) / 4 atol=1e-12
 end
+
+@testset "review regressions" begin
+    # Boundary merging must respect time order: the last MPO of a step acts before the
+    # first MPO of the next. X then Hadamard, twice, from |0⟩ ends in |1⟩ up to phase.
+    H = ComplexF64[1 1; 1 -1] / sqrt(2)
+    mx = iMPO([reshape(_X, 1, 2, 2, 1)])
+    mh = iMPO([reshape(H, 1, 2, 2, 1)])
+    for merge in (false, true)
+        ψ = product_iMPS(ComplexF64, [[1, 0]])
+        evolve!(ψ, [mx, mh], 2; merge)
+        @test abs2(ψ.Γ[1][1, 2, 1]) ≈ 1 atol=1e-12
+    end
+    # same with random non-commuting single-site layers on a two-site cell
+    rng = MersenneTwister(5)
+    Ws = [iMPO([reshape(_rand_unitary(rng, 2), 1, 2, 2, 1), reshape(_rand_unitary(rng, 2), 1, 2, 2, 1)])
+          for _ in 1:3]
+    ψ0 = product_iMPS(ComplexF64, [[1, 0], [0.6, 0.8]])
+    a = deepcopy(ψ0); evolve!(a, Ws, 3)
+    b = deepcopy(ψ0); for _ in 1:3, W in Ws; apply!(b, W); end
+    @test abs(per_site_fidelity(a, b) - 1) < 1e-12
+
+    # Mixed-transfer fidelity must not depend on the virtual gauge: two copies of one state
+    # related by a diagonal sign gauge (the identity Krylov seed used to give 0.5).
+    D = 16
+    id = Matrix(1.0I, D, D)
+    signflip(j) = Diagonal([i == j ? -1.0 : 1.0 for i in 1:D])
+    A = permutedims(cat(id, circshift(id, (1, 0)), signflip(1), signflip(3); dims=3), (1, 3, 2)) / 2
+    G = Diagonal([isodd(i) ? -1.0 : 1.0 for i in 1:D])
+    B = copy(A)
+    for s in axes(A, 2)
+        B[:, s, :] = G * A[:, s, :] * G
+    end
+    st(T) = iMPS([T], [ones(D) / sqrt(D)], 1)
+    @test per_site_fidelity(st(A), st(B)) ≈ 1 atol=1e-12
+    @test per_site_fidelity(st(A), st(A)) ≈ 1 atol=1e-12
+
+    # An annihilating MPO throws a typed error and leaves the input unchanged.
+    ψ = product_iMPS(ComplexF64, [[1, 0]])
+    saved = deepcopy(ψ)
+    @test_throws MPOAnnihilationError apply!(ψ, iMPO([reshape(_P1, 1, 2, 2, 1)]))
+    @test ψ.Γ == saved.Γ && ψ.λ == saved.λ
+
+    # renormalize=true with recanonicalize=false normalizes the state itself, not only the
+    # stored spectra (Bell dimer truncated to bond dimension one).
+    bell = zeros(ComplexF64, 1, 2, 2); bell[1, 1, 1] = 1; bell[1, 2, 2] = 1
+    bell2 = zeros(ComplexF64, 2, 2, 1); bell2[1, 2, 1] = 1; bell2[2, 1, 1] = 1
+    ψ = iMPS(ComplexF64, [bell, bell2])
+    apply!(ψ, iMPO([reshape(_I2, 1, 2, 2, 1)]); maxdim=1, recanonicalize=false)
+    @test inner_product(ψ) ≈ 1 atol=1e-12
+end

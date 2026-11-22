@@ -147,3 +147,42 @@ end
     @test ψ4.λ[2] ≈ ψ4.λ[4] atol=1e-10
     @test abs(energy_density(ψ2, terms2) - e) < 1e-9
 end
+
+@testset "constraint_leakage matches the hard-core transfer matrix" begin
+    for θ in (0.2, 0.6)
+        c2, s2 = cos(θ)^2, sin(θ)^2
+        ψ = product_iMPS(ComplexF64, [[cos(θ), sin(θ)], [cos(θ), sin(θ)]])
+        # ⟨ψ|∏(1 − n n)|ψ⟩ per site = largest eigenvalue of [c² s²; c² 0]
+        λ = (c2 + sqrt(c2^2 + 4c2 * s2)) / 2
+        @test constraint_leakage(ψ, PXPMPO.blockade(2)) ≈ -log(λ) / 2 rtol=1e-10
+        @test constraint_leakage(_projected_product(θ), PXPMPO.blockade(2)) < 1e-14
+    end
+end
+
+@testset "ScarFinder diagnostics" begin
+    terms = reduce(vcat, PXPMPO.layers2())
+    U = trotter_mpos(PXPMPO.layers2(), 0.05; n=2, gate_map=G -> PXPMPO.P3 * G)
+    run(maxdim) = begin
+        ψ = _projected_product()
+        e = energy_density(ψ, terms)
+        scarfinder_step!(ψ, U, 2; nstep=10, maxdim, terms, target=e, tol=1e-10,
+                         constraint=PXPMPO.blockade(2))
+    end
+    # maxdim = χ: the window already projects, so the loss is ≈ 0 and unresolved
+    r2 = run(2)
+    @test r2.loss < 1e-12
+    @test r2.evolve_saturated > 0
+    @test r2.evolve_discarded_sum > 1e-9 > r2.loss
+    # a resolved window: accumulated discarded weight far below the loss
+    r16 = run(16)
+    @test r16.evolve_discarded_sum < 1e-6 * r16.loss
+    @test r16.evolve_max_discarded <= r16.evolve_discarded_sum
+    # P3-folded evolution keeps the blockade; the projection leaks; energy fixing does not repair it
+    @test r16.leakage_evolved < 1e-20
+    @test r16.leakage_projected > 1e-14
+    @test r16.leakage_fixed > 1e-14
+    @test r16.converged && r16.energy_fix_steps > 0
+    # positional destructuring of the first fields is unchanged
+    loss, err = run(16)
+    @test loss == r16.loss
+end
