@@ -1,74 +1,31 @@
 # Constrained ScarFinder with layer MPOs
 
 This page describes the numerical primitives for a ScarFinder search on a
-general χ = 2 iMPS with a constraint folded into every gate (the staggered PXP
-chain with the blockade), and the exact meaning of what they record. Selection
-rules (primitive period, representative, orbit classes, scores, phase labels)
-are not part of the package. A complete example is
+general χ = 2 iMPS in the staggered PXP chain. A complete example is
 `examples/pxp_scarfinder_point.jl`.
 
 ## One iteration
 
 ```julia
-plan = ScarFinderPlan(layers, 0.05; n=2, gate_map=G -> P3 * G, constraint=Blockade())
-r = scarfinder_step!(ψ, plan, 2; nstep=20, maxdim=16, target=e, tol=1e-6,
-                     repair=true, max_project=3, leak_tol=1e-10)
+U = trotter_mpos(layers, 0.05; n=2, gate_map=G -> P3 * G)
+r = scarfinder_step!(ψ, U, 2; nstep=20, maxdim=16, cutoff=1e-12,
+                     terms=layers, target=e, n=2)
 ```
 
-1. Real-time evolution for `nstep` Trotter steps (`plan.mpos`, half steps
-   merged, bond cap `maxdim`). The evolved state `b` is retained.
-2. Every bond is truncated to χ Schmidt values: `a₀`.
-3. With `repair=true`: while the leakage exceeds `leak_tol` and fewer than
-   `max_project` passes were made, the full blockade projector is applied and
-   the state truncated back to χ. Passes are counted after the initial SVD.
-4. `loss = −log F_site(b, a)` on the repaired candidate `a`, before energy
-   correction; `loss_svd` is the same for `a₀`.
-5. The energy correction starts from the residual of `a`, with imaginary-time
-   gates mapped by the **same** `gate_map` (P3 folded), and restarts every
-   rejected trial from the last accepted state.
+The step runs `evolve!`, truncates each bond with `truncate!` and calls
+`energy_fix!` when given a target. The real-time gates carry the blockade
+projector. The correction uses ordinary imaginary-time gates built from
+`layers`. The next real-time window projects out the small leakage introduced
+after the previous window. Measure it separately with
+`constraint_leakage(ψ, Blockade())`.
 
-`constraint=Blockade()` without `repair=true` only adds diagnostics, as in
-earlier versions.
-
-The repair is a bounded heuristic, not an optimal constrained truncation.
-In a reviewed example the first pass lowered the loss from 0.01285235 to
-0.01195834; later passes lowered the leakage further but raised the loss
-slightly; in eight random examples only three reached `1e-10` within three
-passes. The outcome is reported in `project_steps`, `project_status`
-(`:off`, `:clean`, `:converged`, `:budget`, `:stalled`, `:annihilated`),
-`project_converged` and `leakage_repaired`.
-
-The energy correction reports `converged`, `energy_error` (whole state, after
-correction), `energy_initial_error`, `energy_fix_status` (`:converged`,
-`:maxstep`, `:stalled`, `:not_run`), `energy_fix_steps` and
-`energy_fix_rejected`; with `projected_energy=true` also the energy of the legal
-component (`energy_projected_error`, `energy_projected_status`).
-
-### Why corrections fail on leaky candidates
-
-A folded gate tends to the projector, not the identity, as `dτ → 0`. On a
-candidate whose repair did not reach `leak_tol`, every trial also moves the
-energy by the projection. In the measured fine stages, a correction that missed
-`tol` typically got close, after which the residuals of the halved steps
-approached the displacement of the projector alone. That limit was farther
-from the target than the accepted state, so no shorter step could be accepted
-and the remaining trials were spent without progress. These corrections took
-about 84 % of all imaginary-time trials of a 30 + 400 run. They are reported
-as `:maxstep` and keep the last accepted state. The opt-in
-`max_rejections = k` ends such a correction after `k` consecutive rejections
-(`:stalled`). In two measured seeds, `k = 6` left all 400 fine-stage residuals
-bit-identical and cut the trials by 70 %. It changes the trial count, so it is
-not the default.
-
-All static inputs are validated before the state changes: supports and local
-dimension, at most one gate per cell bond in a layer, commutation with periodic
-translates, `gate_map(I)` commuting with each term, commutation of the mapped
-gates (sampled imaginary times), the constraint, and the energy, repair and
-truncation parameters.
+The result is `(loss, energy_error, converged)`. The loss is minus the log of
+the per-site fidelity between the evolved and truncated states. The energy
+error is the residual of the state after correction.
 
 ## Recording trajectories
 
-`scarfinder!(ψ, plan, χ, N; refine=false, observe=f, …)` calls `f(ψ, k, r)`
+`scarfinder!(ψ, U, χ, N; refine=false, observe=f, …)` calls `f(ψ, k, r)`
 for `k = 0` (initial state, `r = nothing`) and after each iteration with the
 returned candidate and its named tuple. `ψ` is the live state; copy it to keep
 it. Use `refine=false` whenever the caller selects its own representative: the
@@ -94,11 +51,6 @@ a project decision.
   `rand_iMPS(T, n, d, dim)`. Complex Gaussian seeds (`randn`) belong to a
   different distribution and are drawn directly. Derive one RNG per task from
   `(grid point, seed id)`.
-- A `ScarFinderPlan` holds no mutable workspace and can be shared by tasks. In
-  the pinned environment (Julia 1.12.6, single BLAS thread), four tasks gave
-  results bit-identical to serial runs. That covers this environment only; across
-  BLAS builds, compare fidelities, spectra, energies and statuses within
-  tolerances.
 - `translate(ψ, k)` shifts site tensors with their right-bond spectra and
   returns independent arrays. On the staggered chain a one-site translation maps
   `H(μ, δ)` to `H(μ, −δ)`, so at `δ ≠ 0` it is not a symmetry of a grid point.

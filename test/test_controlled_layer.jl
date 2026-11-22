@@ -35,8 +35,9 @@ function _midrun_candidate()
     ψ = CLPXP.projected()
     e = energy_density(ψ, CLPXP.terms())
     for _ in 1:6
-        scarfinder_step!(ψ, _UF, 2; nstep=10, maxdim=16, terms=CLPXP.terms(), target=e, tol=1e-10,
-                         structured=false)
+        evolve!(ψ, _UF, 10; maxdim=16, structured=false)
+        truncate!(ψ, 2)
+        energy_fix!(ψ, CLPXP.terms(), 2; target=e, tol=1e-10, structured=false)
     end
     evolve!(ψ, _UF, 5; maxdim=16, structured=false)
     return ψ
@@ -135,27 +136,20 @@ end
 end
 
 @testset "ScarFinder: structured and generic runs agree" begin
-    run(structured) = begin
-        ψ = CLPXP.projected()
-        e = energy_density(ψ, CLPXP.terms())
-        out = [scarfinder_step!(ψ, _UF, 2; nstep=10, maxdim=16, terms=CLPXP.terms(), target=e,
-                                tol=1e-10, constraint=CLPXP.blockade(), structured) for _ in 1:6]
-        ψ, out
+    ψs = CLPXP.projected()
+    ψg = deepcopy(ψs)
+    e = energy_density(ψs, CLPXP.terms())
+    for _ in 1:6
+        r = scarfinder_step!(ψs, _UF, 2; nstep=10, maxdim=16, terms=CLPXP.terms(), target=e, tol=1e-10)
+        _, stats = evolve!(ψg, _UF, 10; maxdim=16, structured=false, return_stats=true)
+        evolved = deepcopy(ψg)
+        truncate!(ψg, 2)
+        loss = -log(min(per_site_fidelity(evolved, ψg), 1.0))
+        correction = energy_fix!(ψg, CLPXP.terms(), 2; target=e, tol=1e-10, structured=false)
+
+        @test stats.num_structured == 0
+        @test abs(r.loss - loss) < 1e-11
+        @test r.converged == correction.converged
     end
-    ψg, rg = run(false)
-    ψs, rs = run(true)
-    @test all(r.evolve_structured == 0 for r in rg)
-    @test all(r.evolve_structured == 21 for r in rs)
-    @test maximum(abs(a.loss - b.loss) for (a, b) in zip(rg, rs)) < 1e-11
-    @test maximum(abs(a.leakage_projected - b.leakage_projected) for (a, b) in zip(rg, rs)) < 1e-11
-    @test all(a.evolve_saturated == b.evolve_saturated for (a, b) in zip(rg, rs))
-    @test all(a.energy_fix_steps == b.energy_fix_steps for (a, b) in zip(rg, rs))
     @test abs(per_site_fidelity(ψg, ψs) - 1) < 1e-12
-    # opt-in adaptive window truncation shrinks bonds and stays close to the reference
-    ψ = CLPXP.projected()
-    e = energy_density(ψ, CLPXP.terms())
-    r0 = scarfinder_step!(deepcopy(ψ), _UF, 2; nstep=10, maxdim=16, terms=CLPXP.terms(), target=e, tol=1e-10)
-    r1 = scarfinder_step!(deepcopy(ψ), _UF, 2; nstep=10, maxdim=16, terms=CLPXP.terms(), target=e, tol=1e-10,
-                          evolve_truncerr=1e-14)
-    @test abs(r1.loss - r0.loss) < 1e-9
 end

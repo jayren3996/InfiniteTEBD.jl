@@ -1431,40 +1431,24 @@ function _bond_crossings_ok(terms, n, d)
     return true
 end
 
-# Static, state-independent preparation of the imaginary-time correction: layers and terms,
-# their spectral bounds, and the gate map. Everything that can be rejected is rejected here,
-# before any state is modified. Read-only after construction (safe to share between tasks).
+# Validate the layers and compute spectral bounds before modifying the state.
 struct _ImagPrep
     layers::Vector{Vector{Any}}
     terms::Vector{Any}
     n::Int
     d::Int
-    gate_map::Any
     spectra::IdDict{Any,Tuple{Float64,Float64}}
 end
 
-# Sample imaginary times at which mapped gates are checked (0 gives the bare map, e.g. P).
-const _GATE_MAP_SAMPLES = (0.0, 0.37, -0.23)
-
-function _prepare_imaginary(terms_or_layers; n::Integer, d::Integer, gate_map=identity)
+function _prepare_imaginary(terms_or_layers; n::Integer, d::Integer)
     layers, terms = _layers_and_terms(terms_or_layers, n, d)
     spectra = IdDict{Any,Tuple{Float64,Float64}}()
     for (h, i, j) in terms
-        a, b, L, _ = _support_span(h, i, j, n, d)
+        _support_span(h, i, j, n, d)
         ishermitian(h) || throw(ArgumentError("energy_fix! requires Hermitian terms"))
         get!(spectra, h) do
             v = eigvals(Hermitian(Matrix(h)))
             (Float64(first(v)), Float64(last(v)))
-        end
-        if gate_map !== identity
-            Pm = gate_map(Matrix{ComplexF64}(I, d^L, d^L))
-            (Pm isa AbstractMatrix && size(Pm) == (d^L, d^L) && all(isfinite, Pm)) ||
-                throw(ArgumentError("gate_map must map a $(d^L)×$(d^L) gate to a finite matrix of the same size"))
-            H = Matrix(h)
-            err = norm(Pm * H - H * Pm)
-            err <= 1e-12 * max(norm(Pm) * norm(H), 1.0) || throw(ArgumentError(
-                "gate_map(I) does not commute with the term on ($i, $j) (‖[P, h]‖ = $err); " *
-                "folding it into the gates would not be a Trotter step of h inside its subspace"))
         end
     end
     for layer in layers
@@ -1472,28 +1456,12 @@ function _prepare_imaginary(terms_or_layers; n::Integer, d::Integer, gate_map=id
             "a layer has two gates (or two translates of one gate) crossing the same bond of " *
             "the $n-site cell; split it into separate layers"))
         check_commuting(layer; n, d)
-        if gate_map !== identity
-            for τ in _GATE_MAP_SAMPLES
-                mapped = [(gate_map(_layer_exp(h - spectra[h][1] * I, -τ)), i, j) for (h, i, j) in layer]
-                try
-                    check_commuting(mapped; n, d)
-                catch err
-                    err isa ArgumentError || rethrow()
-                    throw(ArgumentError("mapped imaginary-time gates of a layer do not commute " *
-                                        "(sampled at τ = $τ): " * sprint(showerror, err)))
-                end
-            end
-        end
     end
-    return _ImagPrep([collect(Any, l) for l in layers], collect(Any, terms), Int(n), Int(d),
-                     gate_map, spectra)
+    return _ImagPrep(layers, terms, Int(n), Int(d), spectra)
 end
 
-function _validate_energy_fix_args(ψ, χ, prep::_ImagPrep; target, tol, alpha, maxstep, cutoff,
-                                   max_rejections=nothing)
+function _validate_energy_fix_args(ψ, χ, prep::_ImagPrep; target, tol, alpha, maxstep, cutoff)
     isfinite(target) || throw(ArgumentError("target must be finite"))
-    isnothing(max_rejections) || max_rejections >= 1 ||
-        throw(ArgumentError("max_rejections must be positive (or nothing)"))
     isfinite(tol) && tol > 0 || throw(ArgumentError("tol must be finite and positive"))
     isfinite(alpha) && alpha >= 0 || throw(ArgumentError("alpha must be finite and nonnegative"))
     maxstep >= 0 || throw(ArgumentError("maxstep must be nonnegative"))
@@ -1504,79 +1472,47 @@ function _validate_energy_fix_args(ψ, χ, prep::_ImagPrep; target, tol, alpha, 
     return nothing
 end
 
-# Kept for callers of the old helper: validate and return (layers, terms).
-function _energy_fix_setup(ψ, terms_or_layers, χ; target, tol, alpha, maxstep, n, cutoff, d,
-                           gate_map=identity)
-    prep = _prepare_imaginary(terms_or_layers; n, d, gate_map)
-    _validate_energy_fix_args(ψ, χ, prep; target, tol, alpha, maxstep, cutoff)
-    return prep.layers, prep.terms
-end
-
-# The imaginary-time MPOs of one trial (independent of any cache, so every path builds
-# exactly the same gates).
 function _imaginary_trial_mpos(prep::_ImagPrep, dτ)
     shifted = [[(h - (dτ > 0 ? prep.spectra[h][1] : prep.spectra[h][2]) * I, i, j) for (h, i, j) in layer]
                for layer in prep.layers]
-    return trotter_mpos(shifted, dτ; evolution=:imaginary, n=prep.n, check=false, d=prep.d,
-                        gate_map=prep.gate_map)
+    return trotter_mpos(shifted, dτ; evolution=:imaginary, n=prep.n, check=false, d=prep.d)
 end
 
-# The correction loop on a validated input. Status: :converged, :maxstep (trial budget used),
-# :stalled (the step size underflowed to zero or became non-finite before the budget),
-# :not_run (maxstep = 0 or alpha = 0 and not converged).
-function _energy_fix_core!(ψ, prep::_ImagPrep, χ; target, tol, alpha, maxstep, cutoff, structured,
-                           intermediate_gauge_skip::Bool=true,
-                           max_rejections::Union{Nothing,Integer}=nothing, trace=nothing)
+function _energy_fix_core!(ψ, prep::_ImagPrep, χ; target, tol, alpha, maxstep, cutoff, structured=true)
     measure(state) = energy_density(state, prep.terms; n=prep.n)
     residual = measure(ψ) - target
-    initial = residual
-    steps = rejected = streak = 0
-    result(conv, status) = (converged=conv, residual=residual, steps=steps, status=status,
-                            initial_residual=initial, rejected=rejected)
-    abs(residual) <= tol && return result(true, :converged)
-    (maxstep == 0 || iszero(alpha)) && return result(false, :not_run)
+    steps = 0
+    if abs(residual) <= tol || maxstep == 0 || iszero(alpha)
+        return (converged=abs(residual) <= tol, residual, steps)
+    end
     eltype(ψ) <: Real && throw(ArgumentError("energy_fix! needs a complex iMPS; use mps_promote_type"))
     trial = deepcopy(ψ)
     dτ = alpha * residual
     while steps < maxstep && isfinite(dτ) && !iszero(dτ)
-        attempted = try
-            Ws = _imaginary_trial_mpos(prep, dτ)
-            for (k, W) in enumerate(Ws)
-                # As in `evolve!`: only the last layer of a trial restores the canonical gauge;
-                # the next application canonicalizes its input anyway.
-                _apply_mpo!(trial, W; maxdim=χ, cutoff, truncerr=0.0, renormalize=true,
-                            recanonicalize=k == length(Ws) || !intermediate_gauge_skip,
-                            normalize_cells=!intermediate_gauge_skip, structured)
-            end
-            measure(trial) - target
-        catch err
-            err isa MPOAnnihilationError || rethrow()
-            Inf                                   # a folded projector removed the state
+        Ws = _imaginary_trial_mpos(prep, dτ)
+        for (k, W) in enumerate(Ws)
+            # Only the last layer restores the canonical gauge. The next application
+            # canonicalizes its input.
+            _apply_mpo!(trial, W; maxdim=χ, cutoff, truncerr=0.0, renormalize=true,
+                        recanonicalize=k == length(Ws), normalize_cells=false, structured)
         end
+        attempted = measure(trial) - target
         steps += 1
-        isnothing(trace) || push!(trace, (dτ, attempted))
         if abs(attempted) < abs(residual)
-            streak = 0
             _copy_imps_state!(ψ, trial)
-            residual_old = residual
+            abs(attempted) <= tol && return (converged=true, residual=attempted, steps)
+            dτ *= clamp(attempted / (residual - attempted), -2, 2)
             residual = attempted
-            abs(attempted) <= tol && return result(true, :converged)
-            dτ *= clamp(attempted / (residual_old - attempted), -2, 2)
         else
-            rejected += 1
-            streak += 1
             _copy_imps_state!(trial, ψ)          # restart from the last accepted state
             dτ /= 2
-            # opt-in: stop after this many consecutive rejections (no progress)
-            !isnothing(max_rejections) && streak >= max_rejections && steps < maxstep &&
-                return result(false, :stalled)
         end
     end
-    return result(false, steps >= maxstep ? :maxstep : :stalled)
+    return (converged=false, residual, steps)
 end
 
 """
-    energy_fix!(ψ, terms_or_layers, χ; target, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n, cutoff=SVDTOL, gate_map=identity, structured=true)
+    energy_fix!(ψ, terms_or_layers, χ; target, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n, cutoff=SVDTOL, structured=true)
 
 Move the energy per site of `ψ` toward `target` with short imaginary-time
 steps built as layer MPOs from site-dependent terms.
@@ -1587,60 +1523,32 @@ greedily into layers that satisfy the [`layer_mpo`](@ref) precondition. The
 terms are repeated with period `n`, and the energy is measured with
 `energy_density(ψ, terms; n)`.
 
-`gate_map` is applied to every local imaginary-time gate, exactly as in
-[`trotter_mpos`](@ref); `gate_map = G -> P3 * G` folds the PXP blockade into the
-correction, as the real-time gates usually are. Before `ψ` is touched, all static
-inputs are validated: term supports and local dimension, at most one gate per
-cell bond and layer, commutation within each layer (with periodic translates),
-`gate_map(I)` commuting with every term, and commutation of the mapped gates of
-each layer (checked at a few sample imaginary times).
-
 The step rule is that of [`fix_energy!`](@ref): start with
 `dτ = alpha · (E − target)`; each trial applies a second-order imaginary-time
-step `trotter_mpos(layers, dτ; evolution=:imaginary, gate_map)` truncated to `χ`.
+step `trotter_mpos(layers, dτ; evolution=:imaginary)` truncated to `χ`.
 A trial that reduces `|E − target|` is accepted and the next `dτ` is predicted
-from the measured slope (growth clamped to a factor 2); a rejected trial
-(including one whose folded projector annihilates the state) is discarded, the
+from the measured slope (growth clamped to a factor 2). On rejection, the
 trial restarts from the last accepted state and `dτ` is halved. `ψ` always holds
 the last accepted state. Each term is shifted by a constant before
 exponentiation, which changes nothing after normalization but keeps the gates
 bounded.
 
-With a folded projector, `dτ → 0` does not give the identity: the gate tends to
-the projector, so on a leaky input every trial also moves the energy by the
-projection. The secant model then fits poorly and trials can be exhausted
-without reaching `tol`; that is reported, not hidden. Typically the residual of
-the halved steps tends to the displacement of the projector alone; once that
-limit is farther from `target` than the accepted state, no shorter step can be
-accepted and the remaining budget is spent without progress. `max_rejections`
-(default `nothing`, off) stops after that many consecutive rejections, keeping
-the last accepted state; it changes the number of trials, so leave it off where
-the full budget is part of the protocol.
-
-Returns a named tuple whose first three fields are unchanged:
-`(converged, residual, steps, status, initial_residual, rejected)` —
-whether `|E − target| ≤ tol`, the final `E − target` of the state left in `ψ`,
-the number of trials, the stopping reason (`:converged`, `:maxstep`,
-`:stalled` when `dτ` underflowed, or — only with the opt-in
-`max_rejections = k` — after `k` consecutive rejected trials, `:not_run` for
-`maxstep = 0` or `alpha = 0`), the residual at entry, and the number of rejected
-trials. Not converging within `maxstep` does not show that the target is
-unreachable. It does not warn; check `converged` and `status`.
+Returns `(converged, residual, steps)`. The residual is `E − target` for
+the state left in `ψ`, and `steps` counts the trials.
 """
 function energy_fix!(ψ::iMPS, terms_or_layers, χ::Integer; target::Real, tol::Real=1e-6,
                      alpha::Real=0.1, maxstep::Integer=50, n::Integer=ψ.n,
                      cutoff::Real=SVDTOL, d::Union{Nothing,Integer}=nothing,
-                     structured::Bool=true, gate_map=identity,
-                     max_rejections::Union{Nothing,Integer}=nothing)
+                     structured::Bool=true)
     dd = isnothing(d) ? size(ψ.Γ[1], 2) : d
-    prep = _prepare_imaginary(terms_or_layers; n, d=dd, gate_map)
-    _validate_energy_fix_args(ψ, χ, prep; target, tol, alpha, maxstep, cutoff, max_rejections)
-    return _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff, structured,
-                             max_rejections)
+    n > 0 || throw(ArgumentError("unit-cell length must be positive"))
+    prep = _prepare_imaginary(terms_or_layers; n, d=dd)
+    _validate_energy_fix_args(ψ, χ, prep; target, tol, alpha, maxstep, cutoff)
+    return _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff, structured)
 end
 
 #---------------------------------------------------------------------------------------------------
-# ScarFinder step with MPOs
+# Per-site fidelity
 #---------------------------------------------------------------------------------------------------
 """
     per_site_fidelity(ψ1, ψ2)
@@ -1685,3 +1593,146 @@ function constraint_leakage(ψ::iMPS, P::iMPO)
 end
 
 
+
+#---------------------------------------------------------------------------------------------------
+# ScarFinder with layer MPOs
+#---------------------------------------------------------------------------------------------------
+"""
+    scarfinder_step!(ψ, mpos, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n)
+
+Evolve `ψ` for `nstep` Trotter steps with a vector of layer MPOs, then
+[`truncate!`](@ref) every bond to `χ`. If `target` is given, correct the
+energy with the imaginary-time layers of [`energy_fix!`](@ref) built from
+`terms`. The term period `n` defaults to the first MPO's cell length, or
+to `ψ.n` for an empty vector.
+
+Returns `(loss, energy_error, converged)`. The loss is `−log F_site` between
+the evolved and truncated states, measured before energy correction.
+`energy_error` is `E(ψ) − target` after correction (`nothing` without
+`target`). `converged` indicates whether the correction met `tol` (`true`
+without `target`).
+"""
+function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integer;
+                          nstep::Integer=10, maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL,
+                          terms=nothing, target::Union{Nothing,Real}=nothing,
+                          tol::Real=1e-6, alpha::Real=0.1, maxstep::Integer=50,
+                          n::Integer=isempty(mpos) ? ψ.n : first(mpos).n)
+    _validate_mpo_truncation(χ, cutoff, 0.0)
+    n > 0 || throw(ArgumentError("unit-cell length must be positive"))
+    ψ.n % n == 0 || throw(ArgumentError("ψ.n = $(ψ.n) must be a multiple of the term period n = $n"))
+    !isnothing(target) && isnothing(terms) && throw(ArgumentError("supply `terms` when setting `target`"))
+    prep = isnothing(terms) ? nothing : _prepare_imaginary(terms; n, d=size(ψ.Γ[1], 2))
+    if !isnothing(target)
+        _validate_energy_fix_args(ψ, χ, prep; target, tol, alpha, maxstep, cutoff)
+    end
+
+    _warn_scarfinder_nstep(nstep, :gate)
+    evolve!(ψ, mpos, nstep; maxdim, cutoff)
+    before = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
+    truncate!(ψ, χ; cutoff)
+    loss = -log(min(per_site_fidelity(before, ψ), 1.0))
+    if isnothing(target)
+        return (loss=loss, energy_error=nothing, converged=true)
+    end
+    res = _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff)
+    return (loss=loss, energy_error=res.residual, converged=res.converged)
+end
+
+# A matrix density `h` belongs to the gate-list interface; MPO steps take `terms`.
+function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, h::AbstractMatrix, χ::Integer;
+                          kwargs...)
+    throw(ArgumentError("with MPOs, pass the Hamiltonian as `terms=[(h, i, j), …]`, " *
+                        "not as a matrix argument"))
+end
+
+"""
+    scarfinder!(ψ, mpos, χ, N; refine=true, refine_step=100, refine_mpos=mpos, history=nothing, observe=nothing, kwargs...)
+
+Run `N` MPO [`scarfinder_step!`](@ref) iterations. With `refine=true`,
+[`minimize_on_trajectory!`](@ref) can replace `ψ` with the minimum-entanglement
+state found over `refine_step` further steps using `refine_mpos`.
+
+`observe(ψ, k, r)` receives `k = 0` and `r = nothing` at the initial state,
+then each main iteration's candidate and result. Copy the live state to keep a
+snapshot. `history` collects the `N` results. Refinement contributes no samples
+to either. Returns `ψ`.
+"""
+function scarfinder!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integer, N::Integer;
+                     refine::Bool=true, refine_step::Integer=100,
+                     refine_mpos::AbstractVector{<:iMPO}=mpos,
+                     history::Union{Nothing,AbstractVector}=nothing, observe=nothing, kwargs...)
+    N >= 0 || throw(ArgumentError("N must be nonnegative"))
+    (!refine || refine_step >= 0) || throw(ArgumentError("refine_step must be nonnegative"))
+    isnothing(observe) || observe(ψ, 0, nothing)
+    for k in 1:N
+        r = scarfinder_step!(ψ, mpos, χ; kwargs...)
+        isnothing(history) || push!(history, r)
+        isnothing(observe) || observe(ψ, k, r)
+    end
+    if refine
+        step! = state -> scarfinder_step!(state, refine_mpos, χ; kwargs...)
+        minimize_on_trajectory!(_refinement_objective, step!, ψ, refine_step)
+    end
+    return ψ
+end
+
+function scarfinder!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, h::Union{Nothing,AbstractMatrix},
+                     χ::Integer, N::Integer; kwargs...)
+    isnothing(h) && return scarfinder!(ψ, mpos, χ, N; kwargs...)
+    throw(ArgumentError("with MPOs, pass the Hamiltonian as `terms=[(h, i, j), …]`, " *
+                        "not as a matrix argument"))
+end
+
+export release_recorder
+"""
+    observe, record = release_recorder(ψ0; dt, site_ops=(;), fidelity=true)
+
+An observer for the MPO [`evolve!`](@ref) of a release from `ψ0`, and the
+record it fills (a named tuple of vectors, one entry per sample):
+
+- `step`, `t = step · dt` (physical time of the sampled state);
+- `entropy[k][b]`: entanglement entropy of bond `b` (`ent_S`, natural log);
+- `dims[k][b]`: retained bond dimension (`length(λ[b])`);
+- `max_discarded`, `num_saturated` (requested dimension exceeded `maxdim`),
+  `num_at_cap` (retained dimension equal to `maxdim`), `max_kept_dim`: over the
+  applications since the previous sample (zero at `t = 0`);
+- `ops[name][k][j]`: `⟨O⟩` on site `j` of the cell for each `name => O` in
+  `site_ops` (e.g. `(; n = [0 0; 0 1])` gives `n_A`, `n_B` on a two-site cell);
+- `return_fidelity[k]`: `per_site_fidelity(ψ0, ψ(t))` (amplitude per site; the
+  squared overlap per site is its square).
+
+It only reads the state. The project decides how to score entropies (maximum or
+mean over bonds, time window) and what counts as saturation; the record keeps
+the separate measurements "retained dimension reached the cap", "requested
+dimension exceeded the cap" and the entropies themselves.
+
+```julia
+obs, rec = release_recorder(ψ0; dt=0.05, site_ops=(; n=N))
+evolve!(deepcopy(ψ0), U, 400; maxdim=32, observe=obs, every=5)
+```
+"""
+function release_recorder(ψ0::iMPS; dt::Real, site_ops=(;), fidelity::Bool=true)
+    ref = deepcopy(ψ0)
+    names = collect(keys(site_ops))
+    record = (step=Int[], t=Float64[], entropy=Vector{Float64}[], dims=Vector{Int}[],
+              max_discarded=Float64[], num_saturated=Int[], num_at_cap=Int[], max_kept_dim=Int[],
+              ops=Dict{Symbol,Vector{Vector{Float64}}}(k => Vector{Float64}[] for k in names),
+              return_fidelity=Float64[])
+    observe = function (φ, k, stats)
+        push!(record.step, k)
+        push!(record.t, k * dt)
+        push!(record.entropy, [ent_S(φ, b) for b in 1:φ.n])
+        push!(record.dims, length.(φ.λ))
+        push!(record.max_discarded, isnothing(stats) ? 0.0 : stats.max_discarded_weight)
+        push!(record.num_saturated, isnothing(stats) ? 0 : stats.num_saturated)
+        push!(record.num_at_cap, isnothing(stats) ? 0 : stats.num_at_cap)
+        push!(record.max_kept_dim, isnothing(stats) ? maximum(length, φ.λ) : stats.max_kept_dim)
+        for name in names
+            O = site_ops[name]
+            push!(record.ops[name], [real(expect(φ, O, j, j)) for j in 1:φ.n])
+        end
+        fidelity && push!(record.return_fidelity, per_site_fidelity(ref, φ))
+        return nothing
+    end
+    return observe, record
+end

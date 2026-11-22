@@ -2,7 +2,7 @@
 #
 #   H = Σ P X P + Σ_A (μ+δ) n + Σ_B (μ−δ) n,   two-site cell, A = site 1.
 #
-# Per seed: random χ = 2 tensors → bounded blockade repair → folded energy correction to e →
+# Per seed: random χ = 2 tensors → energy correction to e →
 # 30 coarse iterations (ΔT = 1) → ~400 fine iterations (ΔT = 0.1), recording every returned
 # candidate. The representative, orbit classes and scores are the project's decisions; this
 # script only shows where they plug in. A release of a chosen state is recorded at the end.
@@ -24,9 +24,7 @@ h(c) = kron(P, X, P) + c * kron(I2, N, I2)
 point_id = 1                                    # the project's identifier of (μ, δ, e)
 layers = [[(h(μ + δ), 2, 4)], [(h(μ - δ), 1, 3)]]     # centres on site 1 (A), then site 2 (B)
 
-# Validated once, shared read-only by all seeds of all energies at this (μ, δ).
-plan = ScarFinderPlan(layers, 0.05; n=2, gate_map=fold, constraint=Blockade())
-const P_MPO = iMPO(Blockade(), 2)
+U = trotter_mpos(layers, 0.05; n=2, gate_map=fold)
 
 # Each seed's stream depends only on (grid point, seed id), not on scheduling. The
 # historical scripts drew complex Gaussian tensors; `rand_iMPS(rng, …)` draws uniform ones.
@@ -35,16 +33,11 @@ seed_state(seed_id) = begin
     iMPS(ComplexF64, [randn(rng, ComplexF64, 2, 2, 2) for _ in 1:2]; renormalize=true)
 end
 
-options = (maxdim=16, target=e, tol=1e-6, maxstep=50,
-           repair=true, max_project=3, leak_tol=1e-10,
-           projected_energy=true)          # also record the energy of the legal component
+options = (maxdim=16, cutoff=1e-12, terms=layers, target=e, n=2)
 
 function run_seed(seed_id; coarse=30, fine=400)
     ψ = seed_state(seed_id)
-    for _ in 1:3
-        apply!(ψ, P_MPO; maxdim=2)         # repair the random tensors before the first correction
-    end
-    init = energy_fix!(ψ, layers, 2; target=e, tol=1e-6, n=2, gate_map=fold)
+    init = energy_fix!(ψ, layers, 2; target=e, n=2)
     # Fine-stage record: the candidate returned by each iteration (after correction).
     times, states, nA, nB, diag = Float64[], Any[], Float64[], Float64[], Any[]
     record = (φ, k, r) -> begin
@@ -55,23 +48,18 @@ function run_seed(seed_id; coarse=30, fine=400)
         push!(nB, real(expect(φ, N, 2, 2)))
         push!(diag, r)
     end
-    scarfinder!(ψ, plan, 2, coarse; refine=false, nstep=20, options...)
-    scarfinder!(ψ, plan, 2, fine; refine=false, nstep=2, observe=record, options...)
-    status = (init=init.status,
-              unmet_energy=count(r -> !r.converged, diag),
-              unmet_leak=count(r -> !r.project_converged, diag),
-              trials=sum(r.energy_fix_steps for r in diag),
-              max_projected_energy_error=maximum(abs(r.energy_projected_error) for r in diag))
-    return (; seed_id, ψ, times, states, nA, nB, diag, status)
+    scarfinder!(ψ, U, 2, coarse; refine=false, nstep=20, options...)
+    scarfinder!(ψ, U, 2, fine; refine=false, nstep=2, observe=record, options...)
+    unmet_energy = count(r -> !r.converged, diag)
+    return (; seed_id, ψ, times, states, nA, nB, diag, init, unmet_energy)
 end
 
 nseeds = SMALL ? 2 : 8
 fine = SMALL ? 20 : 400
 results = [run_seed(id; coarse=SMALL ? 3 : 30, fine) for id in 1:nseeds]
 for r in results
-    @printf("seed %d  init %-9s  unmet energy %3d  unmet leak %3d  trials %5d  max|E_P − e| %.1e\n",
-            r.seed_id, r.status.init, r.status.unmet_energy, r.status.unmet_leak, r.status.trials,
-            r.status.max_projected_energy_error)
+    @printf("seed %d  initial correction converged %s  unmet energy %d\n",
+            r.seed_id, r.init.converged, r.unmet_energy)
 end
 
 # ---- project decisions (not in the package): primitive period, representative, classes ----
@@ -85,7 +73,7 @@ representative = best.states[k]
 
 # ---- release under the full H, recorded without changing the integrator ----
 obs, rec = release_recorder(representative; dt=0.05, site_ops=(; n=N))
-evolve!(deepcopy(representative), plan.mpos, SMALL ? 40 : 400; maxdim=16, observe=obs, every=5)
+evolve!(deepcopy(representative), U, SMALL ? 40 : 400; maxdim=16, observe=obs, every=5)
 window = findall(t -> 10 <= t <= 20, rec.t)
 @printf("release: %d samples, final t = %.2f, max bond entropy %.3f, bonds at cap in %d samples\n",
         length(rec.t), rec.t[end], maximum(maximum, rec.entropy), count(>(0), rec.num_at_cap))

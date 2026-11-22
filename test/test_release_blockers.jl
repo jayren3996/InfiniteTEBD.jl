@@ -29,9 +29,7 @@ const _U = trotter_mpos(RBPXP.layers(), 0.05; n=2, gate_map=G -> RBPXP.P3 * G)
     e = energy_density(RBPXP.seed(0.45), RBPXP.terms())
     options = [(; nstep=6, maxdim=12),
                (; nstep=6, maxdim=12, terms=RBPXP.terms()),
-               (; nstep=6, maxdim=12, terms=RBPXP.terms(), target=e, tol=1e-10),
-               (; nstep=6, maxdim=12, terms=RBPXP.terms(), target=e, tol=1e-10,
-                  constraint=Blockade(), projected_energy=true)]
+               (; nstep=6, maxdim=12, terms=RBPXP.terms(), target=e, tol=1e-10)]
     for kw in options
         a, b = RBPXP.seed(0.45), RBPXP.seed(0.45)
         hist = Any[]
@@ -108,14 +106,13 @@ end
     tiled = product_iMPS(ComplexF64, repeat([[0, 1], [0, 1]], 54))
     @test constraint_leakage(tiled, Blockade()) == Inf
     # analytic regression: |1⟩ ⊗ (δ|0⟩ + √(1-δ²)|1⟩), δ = 1e-3; P ψ ∝ |1 0 1 0 …⟩,
-    # leakage −log(δ²)/4 per site, occupation 1/2; unchanged up to 120 sites
+    # leakage −log(δ²)/4 per site; unchanged up to 120 sites
     δ = 1e-3
     exact = -log(δ^2) / 4
     @test exact ≈ 3.45387763949 atol = 1e-11
     for n in (2, 40, 100, 108, 112, 120)
         s = product_iMPS(ComplexF64, repeat([ComplexF64[0, 1], ComplexF64[δ, sqrt(1 - δ^2)]], n ÷ 2))
         @test abs(constraint_leakage(s, Blockade()) - exact) < 1e-13
-        @test abs(projected_energy_density(s, Blockade(), [(RBPXP.N, 1, 1), (RBPXP.N, 2, 2)]; n=2) - 0.5) < 1e-13
     end
 end
 
@@ -126,17 +123,7 @@ end
         saved = deepcopy(ψ)
         W = RBPXP.site(RBPXP.X)
         @test_throws ArgumentError scarfinder_step!(ψ, [W], 2; nstep=3, maxdim=4,
-            terms=[(Matrix(1.0I, 3, 3), 1, 1)], constraint=Blockade(), projected_energy=true, kw...)
+            terms=[(Matrix(1.0I, 3, 3), 1, 1)], kw...)
         @test ψ.Γ == saved.Γ && ψ.λ == saved.λ
     end
-    # the optional projected energy reports its own failure instead of throwing
-    full = product_iMPS(ComplexF64, [[0, 1], [0, 1]])
-    UU = trotter_mpos(RBPXP.layers(), 0.05; n=2)
-    r = scarfinder_step!(deepcopy(full), UU, 2; nstep=2, maxdim=8, terms=RBPXP.terms(),
-                         constraint=Blockade(), projected_energy=true)
-    @test r.energy_projected_status === :annihilated && isnan(r.energy_projected)
-    r = scarfinder_step!(RBPXP.seed(0.45), _U, 2; nstep=4, maxdim=12, terms=RBPXP.terms(),
-                         constraint=Blockade(), projected_energy=true)
-    @test r.energy_projected_status === :ok
-    @test isnothing(scarfinder_step!(RBPXP.seed(0.45), _U, 2; nstep=4, maxdim=12).energy_projected_status)
 end

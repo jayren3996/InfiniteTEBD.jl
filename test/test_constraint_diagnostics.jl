@@ -3,8 +3,7 @@ using LinearAlgebra
 using Random
 using InfiniteTEBD
 
-# Blockade leakage and the energy of the projected (physical) component, checked against the
-# generic projector MPO and against an independent classical transfer-matrix calculation.
+# Blockade leakage checked against the projector MPO and an independent transfer matrix.
 module CDPXP
 using LinearAlgebra
 using InfiniteTEBD
@@ -20,39 +19,13 @@ layers() = [[(h(CA), 2, 4)], [(h(CB), 1, 3)]]
 terms() = reduce(vcat, layers())
 product(u, k) = product_iMPS(ComplexF64, [ComplexF64.(u) for _ in 1:k])
 
-# Two-site product state with real amplitudes u₁, u₂ (cell sites 1, 2), projected on the
-# blockade and normalized: a classical hard-core gas. Site transfer T_k[p, q] = w_k[q] if not
-# both occupied, w = u²; cell transfer M = T₁T₂ with eigenvalue μ, eigenvectors l, r. A local
-# observable is a window of three cells with modified site matrices. Returns the per-site
-# leakage and the energy density of the PXP terms (centers: site 1 with c_A, site 2 with c_B).
-function exact_projected(u1, u2=u1)
+# Perron root of the product of the two classical hard-core site transfers.
+function exact_leakage(u1, u2=u1)
     us = (u1 ./ norm(u1), u2 ./ norm(u2))
     T = [[w[1] w[2]; w[1] 0.0] for w in (us[1] .^ 2, us[2] .^ 2)]
-    M = T[1] * T[2]
-    F, G = eigen(M), eigen(Matrix(transpose(M)))
+    F = eigen(T[1] * T[2])
     k = argmax(abs.(F.values))
-    μ = real(F.values[k])
-    r = real(F.vectors[:, k])
-    l = real(G.vectors[:, argmax(abs.(G.values))])
-    E0 = [1.0 0; 0 0]
-    D1 = [0.0 0; 0 1]
-    window(ms) = dot(l, prod(ms) * r) / (μ^3 * dot(l, r))
-    # positions 1..6 = (prev cell 1, 2), (cell 1, 2), (next cell 1, 2); site j at position 2+j
-    function local_mats(j, kind)
-        ms = Any[T[1], T[2], T[1], T[2], T[1], T[2]]
-        c = 2 + j
-        if kind === :n
-            ms[c] = T[j] * D1
-        else
-            u = us[j]
-            ms[c-1] = ms[c-1] * E0                              # left neighbour empty
-            ms[c] = [u[1]*u[2] u[1]*u[2]; 0 0]                  # cross term, both values
-            ms[c+1] = ms[c+1] * E0                              # right neighbour empty
-        end
-        return ms
-    end
-    e = sum(window(local_mats(j, :pxp)) + cj * window(local_mats(j, :n)) for (j, cj) in ((1, CA), (2, CB))) / 2
-    return (leakage=-log(μ) / 4, energy=e)
+    return -log(real(F.values[k])) / 4
 end
 end
 using .CDPXP: CDPXP
@@ -74,8 +47,6 @@ _tile(ψ, k) = InfiniteTEBD.iMPS(repeat(ψ.Γ, k), repeat(ψ.λ, k), k * ψ.n)
     inputs = [legal, evolved, truncated, χ8]
     for ψ in inputs
         @test abs(constraint_leakage(ψ, _BLK) - constraint_leakage(ψ, _PMPO)) < 1e-13
-        @test abs(projected_energy_density(ψ, _BLK, CDPXP.terms()) -
-                  projected_energy_density(ψ, _PMPO, CDPXP.terms())) < 1e-12
     end
     @test constraint_leakage(evolved, _BLK) < 1e-13
     @test constraint_leakage(truncated, _BLK) > 1e-12
@@ -86,21 +57,17 @@ end
               product_iMPS(ComplexF64, [[0, 1], [1, 0]]))
         for P in (_BLK, _PMPO)
             @test constraint_leakage(ψ, P) < 1e-14
-            @test abs(projected_energy_density(ψ, P, CDPXP.terms()) -
-                      energy_density(ψ, CDPXP.terms())) < 1e-13
         end
     end
 end
 
-@testset "leaky product state: exact projected energy and leakage" begin
+@testset "leaky product state: exact leakage" begin
     for (u1, u2) in (([cos(0.35), sin(0.35)], [cos(0.35), sin(0.35)]),
                      ([cos(0.9), sin(0.9)], [cos(0.9), sin(0.9)]), ([0.3, 0.8], [0.9, -0.5]))
-        ex = CDPXP.exact_projected(u1, u2)
+        ex = CDPXP.exact_leakage(u1, u2)
         ψ = product_iMPS(ComplexF64, [ComplexF64.(u1 ./ norm(u1)), ComplexF64.(u2 ./ norm(u2))])
-        @test abs(energy_density(ψ, CDPXP.terms()) - ex.energy) > 1e-3      # the leak matters
         for P in (_BLK, _PMPO)
-            @test abs(constraint_leakage(ψ, P) - ex.leakage) < 1e-13
-            @test abs(projected_energy_density(ψ, P, CDPXP.terms()) - ex.energy) < 1e-12
+            @test abs(constraint_leakage(ψ, P) - ex) < 1e-13
         end
     end
 end
@@ -110,18 +77,16 @@ end
     # weight per cell is ≈ δ_B² while P ψ stays well conditioned.
     for (δA, δB) in ((1e-6, 1e-3), (1e-9, 1e-5))
         u1, u2 = [δA, 1.0], [δB, 1.0]
-        ex = CDPXP.exact_projected(u1, u2)
-        @test ex.leakage > 3
+        ex = CDPXP.exact_leakage(u1, u2)
+        @test ex > 3
         cell = [ComplexF64.(u1 ./ norm(u1)), ComplexF64.(u2 ./ norm(u2))]
         for k in (1, 2, 4)                       # tiling invariance
             ψ = product_iMPS(ComplexF64, repeat(cell, k))
-            @test abs(constraint_leakage(ψ, _BLK) / ex.leakage - 1) < 1e-12
-            @test abs(projected_energy_density(ψ, _BLK, CDPXP.terms(); n=2) - ex.energy) < 1e-10
+            @test abs(constraint_leakage(ψ, _BLK) / ex - 1) < 1e-12
             ψs = deepcopy(ψ)                     # rescaling invariance (not normalized)
             ψs.Γ[1] .*= 1e-3
             ψs.Γ[end] .*= 7.0
-            @test abs(constraint_leakage(ψs, _BLK) / ex.leakage - 1) < 1e-12
-            @test abs(projected_energy_density(ψs, _BLK, CDPXP.terms(); n=2) - ex.energy) < 1e-10
+            @test abs(constraint_leakage(ψs, _BLK) / ex - 1) < 1e-12
         end
     end
     # Uniform near full packing: nearly a two-fold crystal (transfer gap ~ δ). The leakage
@@ -145,64 +110,21 @@ end
     @test abs(constraint_leakage(ψs, _BLK) / ref - 1) < 1e-12
 end
 
-@testset "exact annihilation: projected energy undefined" begin
+@testset "exact annihilation" begin
     full = product_iMPS(ComplexF64, [[0, 1], [0, 1]])
     for P in (_BLK, _PMPO)
         @test constraint_leakage(full, P) == Inf
-        @test_throws MPOAnnihilationError projected_energy_density(full, P, CDPXP.terms())
     end
     @test constraint_leakage(_tile(full, 3), _BLK) == Inf
-    # through the step: unfolded PXP leaves |11⟩ invariant, so the candidate has P ψ = 0
-    e = energy_density(full, CDPXP.terms())
-    r = scarfinder_step!(deepcopy(full), _UU, 2; nstep=2, maxdim=8, terms=CDPXP.terms(), target=e,
-                         constraint=_BLK, projected_energy=true)
-    @test r.converged && abs(r.energy_error) < 1e-12
-    @test isnan(r.energy_projected) && isnan(r.energy_projected_error)
-    @test r.leakage_fixed == Inf
-end
-
-@testset "scarfinder_step!: projected energy of the returned candidate" begin
-    ψ = apply!(CDPXP.product([cos(0.35), sin(0.35)], 2), _PMPO)
-    e = energy_density(ψ, CDPXP.terms())
-    kw = (nstep=10, maxdim=16, terms=CDPXP.terms(), target=e, tol=1e-10)
-    for _ in 1:3
-        scarfinder_step!(ψ, _UF, 2; kw...)
-    end
-    a, b = deepcopy(ψ), deepcopy(ψ)
-    rb = scarfinder_step!(a, _UF, 2; kw..., constraint=_BLK, projected_energy=true)
-    rg = scarfinder_step!(b, _UF, 2; kw..., constraint=_PMPO, projected_energy=true)
-    @test rb.converged && abs(rb.energy_error) <= 1e-10
-    # measured on the returned candidate, after the energy fix, without truncation
-    @test rb.energy_projected == projected_energy_density(a, _BLK, CDPXP.terms())
-    @test rb.energy_projected_error == rb.energy_projected - e
-    @test abs(rb.energy_projected_error) > 1e3 * abs(rb.energy_error)     # misses the target
-    @test abs(rb.energy_projected - rg.energy_projected) < 1e-12
-    @test abs(rb.leakage_projected - rg.leakage_projected) < 1e-13
-    @test abs(rb.leakage_fixed - rg.leakage_fixed) < 1e-13
-    @test rb.loss == rg.loss && abs(per_site_fidelity(a, b) - 1) < 1e-14
-    # opt-in: defaults unchanged, and no target gives a value but no residual
-    r0 = scarfinder_step!(deepcopy(ψ), _UF, 2; kw...)
-    @test isnothing(r0.energy_projected) && isnothing(r0.energy_projected_error)
-    @test r0.loss == rb.loss
-    r1 = scarfinder_step!(deepcopy(ψ), _UF, 2; nstep=10, maxdim=16, terms=CDPXP.terms(),
-                          constraint=_BLK, projected_energy=true)
-    @test r1.energy_projected isa Float64 && isnothing(r1.energy_projected_error)
 end
 
 @testset "scarfinder_step!: static inputs validated before mutation" begin
     ψ0 = apply!(CDPXP.product([cos(0.35), sin(0.35)], 2), _PMPO)
     e = energy_density(ψ0, CDPXP.terms())
-    P3site = layer_mpo([(Matrix{ComplexF64}(I, 9, 9), 1, 2)], 2; d=3)
-    bad = [(; constraint=Blockade(occupied=3)),
-           (; constraint=P3site),
-           (; constraint="blockade"),
-           (; terms=CDPXP.terms(), target=NaN),
+    bad = [(; terms=CDPXP.terms(), target=NaN),
            (; terms=CDPXP.terms(), target=e, tol=-1.0),
            (; terms=CDPXP.terms(), target=e, maxstep=-1),
-           (; target=e),
-           (; projected_energy=true, terms=CDPXP.terms()),
-           (; projected_energy=true, constraint=_BLK),
-           (; evolve_truncerr=-1.0)]
+           (; target=e)]
     for kw in bad
         ψ = deepcopy(ψ0)
         @test_throws Exception scarfinder_step!(ψ, _UF, 2; nstep=4, maxdim=16, kw...)

@@ -116,8 +116,7 @@ The fast path is used for dense complex two-site cells with `renormalize=true`,
 including inputs that leak out of the blockade and intermediate states that
 were not regauged. It falls back to the generic update otherwise, if its
 iteration does not converge, or on any numerical failure; `stats.path`
-(`apply!`), `num_structured` (`evolve!`) and `evolve_structured`
-(`scarfinder_step!`) report which update ran. Pass `structured=false` to force
+(`apply!`) and `num_structured` (`evolve!`) report which update ran. Pass `structured=false` to force
 the generic update.
 
 ## Truncation and ScarFinder
@@ -150,51 +149,20 @@ for k in 1:30
 end
 ```
 
-### Constraint diagnostics and the energy of the physical component
+### Blockade leakage
 
-A truncated candidate generally leaks out of the blockade subspace, and the
-energy correction fixes the energy of the whole state `ψ`, not of its legal
-component `Pψ`. The next P3-folded window removes the illegal part, so the state
-that is actually evolved further can have a different energy. With
-`projected_energy=true`, `scarfinder_step!` also reports the energy density of
-`Pψ/‖Pψ‖` for the returned candidate (exact projection, no truncation back to
-`χ`):
-
-```julia
-r = scarfinder_step!(psi, U, 2; nstep=20, maxdim=16, terms, target=e, tol=1e-10,
-                     constraint=Blockade(), projected_energy=true)
-r.energy_error             # E(ψ) − target: what the energy correction controls
-r.energy_projected_error   # E(Pψ/‖Pψ‖) − target: the physical component
-```
-
-In a six-seed PXP test with `tol=1e-10`, `|energy_error| ≤ 4e-12` while the
-projected residuals were `2e-4` to `4e-3`. `energy_projected` is `NaN` when
-`Pψ = 0`; the standalone [`projected_energy_density`](@ref) throws
-`MPOAnnihilationError` then. Neither changes the loss or the ranking.
-
-`constraint` accepts a projector `iMPO` (any constraint) or a
-[`Blockade`](@ref). For the blockade, `constraint_leakage` uses the probability
-`⟨ψ|P|ψ⟩` as the spectral radius of a positive transfer on two environments
-labelled by the previous occupation. It is a sum of non-negative terms, so small
-weights keep their relative accuracy, the value does not depend on the cell
-length or the normalization of `ψ`, and exact annihilation is an exact zero.
-The generic projector path can fail on such states: it misses convergence of
-the canonical form, or returns `Inf` for long cells. The blockade projection
-`Pψ` itself is built by copying tensor blocks (the 0/1 automaton), with no
-arithmetic. Near full packing, a uniform state projects to an almost two-fold
-crystal; the leakage stays accurate there, but the canonical form of `Pψ` (and
-hence `projected_energy_density`) converges slowly or not at all. The standalone
-function then throws `CanonicalFormError`; `scarfinder_step!` instead reports
-`energy_projected_status = :unconverged` (`:annihilated` when `Pψ = 0`, `:ok`
-otherwise), so the optional diagnostic never fails a step whose state has
-already advanced.
+`constraint_leakage(ψ, Blockade())` computes the per-site leakage from the
+probability `⟨ψ|P|ψ⟩`. Its positive transfer uses two environments labelled
+by the previous site's occupation. The sum of non-negative terms retains the
+relative accuracy of small weights, and the result is invariant under tiling
+and rescaling. `iMPO(Blockade(), n)` constructs the projector for an `n`-site
+cell. Use `constraint_leakage(ψ, P)` with a general projector MPO.
 
 ### Several iterations
 
 `scarfinder!(ψ, mpos, χ, N; refine=false, kwargs...)` runs exactly `N` calls of
-`scarfinder_step!(ψ, mpos, χ; kwargs...)` with the same options (`terms`,
-`target`, `constraint`, `projected_energy`, …); pass `history=Any[]` to keep the
-named tuple of each iteration. With `refine=true` it then scans `refine_step`
+`scarfinder_step!(ψ, mpos, χ; kwargs...)` with the same options.
+Pass `history=Any[]` to keep the named tuple of each iteration. With `refine=true` it then scans `refine_step`
 further steps for the minimum-entanglement point.
 
 ## Annihilation and the fast path

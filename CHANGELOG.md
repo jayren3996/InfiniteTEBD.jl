@@ -1,116 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.x
 
-### Added (constrained ScarFinder workflow)
-
-- `energy_fix!(…; gate_map)` folds a map such as `G -> P3 * G` into the
-  imaginary-time gates; returns `status`, `initial_residual`, `rejected` besides
-  `(converged, residual, steps)`; a trial annihilated by a folded projector is a
-  rejected trial; opt-in `max_rejections`.
-- `scarfinder_step!`: `gate_map` for the correction, bounded post-SVD repair
-  (`repair`, `max_project`, `leak_tol`), `loss` measured after repair and
-  `loss_svd` after the initial SVD, and the fields `leakage_repaired`,
-  `project_steps`, `project_status`, `project_converged`,
-  `energy_initial_error`, `energy_fix_status`, `energy_fix_rejected`,
-  `evolve_at_cap`. Without `repair`, `constraint` stays diagnostic-only.
-- `ScarFinderPlan`: read-only validated layers, real-time MPOs, merged boundary
-  and spectra, shared by seeds; `scarfinder_step!(ψ, plan, χ)` and
-  `scarfinder!(ψ, plan, χ, N)` give the same numbers as the vector methods.
-- Observation: `evolve!(…; observe, every)` samples canonical states at whole
-  Trotter steps without changing the trajectory; `scarfinder!(…; observe)`;
-  `release_recorder`.
-- `rand_iMPS(rng, T, n, d, dim)`; `translate(ψ, k)`. `Random` is a dependency.
-
-### Changed
-
-- All static inputs of the step, including the bond-crossing rule for explicit
-  layers and the gate-map compatibility, are validated before the state changes.
-- `scarfinder_step!` truncates the (canonical) evolved state directly instead of
-  recanonicalizing it first, and energy-correction trials restore the canonical
-  gauge only after their last layer: same states up to roundoff (measured: same
-  trial counts, losses within 1e-10 over 430 iterations).
-- Faster: the annihilation screen uses the bound
-  `½ log ρ(E_self) ≤ Σ log‖Bᵢ‖_F` before any eigensolve; the controlled-layer
-  sector iteration is Arnoldi-accelerated when it converges slowly (fewer
-  fallbacks to the generic update).
-
-## Earlier unreleased changes (after v0.3.0-rc1)
-
-### Fixed
-
-- `scarfinder!(ψ, mpos::Vector{<:iMPO}, χ, N)` reached the legacy gate-list
-  driver (different final truncation, no `terms`/`target`/`constraint`). It now
-  runs `N` calls of the MPO `scarfinder_step!` (optional `history`) and then the
-  refinement scan. A matrix density with an MPO sequence is an `ArgumentError`.
-- The controlled-layer fast path read its control blocks from the input gate,
-  not from the stored (possibly cutoff-truncated) MPO, and kept using them after
-  an in-place edit of `W[i]`. The structure is now read from the stored pieces,
-  and is used only while the tensors equal a snapshot taken at construction
-  (copies and merged products inherit it only in that case).
-- Annihilation detection rejected valid states on long cells (identity on 78+
-  sites). A positive screen is now confirmed against the absolute-value
-  contraction `|W|·|ψ|`. The `Blockade` transfer rescales per site and no longer
-  underflows on long tiled cells with small weights.
-- `scarfinder_step!` validated term sizes only when `target` was given; it now
-  always validates them before modifying the state.
-
-### Added
-
-- `CanonicalFormError` for non-converged canonical forms (was `ErrorException`).
-- `scarfinder_step!` field `energy_projected_status` (`:ok`, `:annihilated`,
-  `:unconverged`); the optional projected-energy diagnostic no longer throws.
-
-## v0.3.0-rc1
-
-### Fixed
-
-- `evolve!` with MPOs merged step boundaries in the wrong order (`last·first`
-  instead of `first·last`). Schedules from `trotter_mpos` were unaffected (their
-  first and last layers coincide); user sequences with different end layers
-  were wrong.
-- `per_site_fidelity` / `inner_product` of two different states could converge
-  to a wrong eigenvalue of the mixed transfer matrix when the states differed by
-  a virtual gauge (identity Krylov seed); mixed transfers now start from a fixed
-  unstructured seed.
-- `apply!` is transactional: on failure the input is unchanged. A projector that
-  annihilates the state throws `MPOAnnihilationError` (including cells whose
-  tensors are nonzero but whose transfer matrix is nilpotent) instead of a LAPACK
-  error or a state built from roundoff.
-- `apply!(…; renormalize=true, recanonicalize=false)` now normalizes the state,
-  not only the stored spectra.
-
-### Added
-
-- Sector-resolved update for controlled-center layers (PXP-type gates on a
-  two-site cell, detected by `layer_mpo`, used by `apply!`/`evolve!`/
-  `scarfinder_step!`/`energy_fix!`; `structured=false` forces the generic path).
-- `scarfinder_step!` diagnostics: `evolve_max_discarded`, `evolve_discarded_sum`,
-  `evolve_saturated`, `evolve_structured`, `leakage_evolved`,
-  `leakage_projected`, `leakage_fixed`, `energy_fix_steps`; options
-  `constraint` and `evolve_truncerr` (opt-in). `constraint_leakage`.
-- `Blockade`: the nearest-neighbour blockade as an explicit constraint, with
-  a positive-transfer `constraint_leakage` (exact for small weights, invariant
-  under tiling and rescaling) and an exact block-copy projection;
-  `iMPO(::Blockade, n)` gives the equivalent projector MPO.
-- `projected_energy_density(ψ, P, terms)` and `scarfinder_step!(…;
-  projected_energy=true)` (`energy_projected`, `energy_projected_error`): the
-  energy of the normalized physical component `Pψ/‖Pψ‖` of the returned
-  candidate. Opt-in; the loss and the ranking are unchanged.
-- `scarfinder_step!` validates all static inputs (constraint compatibility,
-  `target`, `terms`, energy-correction and truncation parameters) before it
-  modifies the state.
-
-### Changed
-
-- The generic canonicalization forms the QR/LQ isometries only when needed
-  (bit-identical results, fewer allocations).
-- MPO-path saturation statistics count only Schmidt values at or above the
-  truncation floor `max(cutoff, 1e-14)` (`chi_req`, `saturated`, `num_saturated`).
-
-## 0.3.0
-
-Layer MPOs and ScarFinder building blocks. The existing API is unchanged.
+Layer MPOs and ScarFinder building blocks.
 
 ### Added
 
@@ -133,6 +25,48 @@ Layer MPOs and ScarFinder building blocks. The existing API is unchanged.
   `per_site_fidelity`, and `scarfinder_step!(ψ, mpos, χ; …)` returning
   `(loss, energy_error, converged)`.
 
+- Sector-resolved update for controlled-center layers such as PXP gates on a
+  two-site cell. `layer_mpo` detects the structure and the MPO updates use it.
+- `Blockade` and `iMPO(::Blockade, n)` represent nearest-neighbour blockade.
+  Standalone `constraint_leakage` uses a positive transfer for the blockade,
+  with relative accuracy for small weights and invariance under tiling and
+  rescaling.
+- `evolve!(…; observe, every)` samples complete Trotter steps without changing
+  the trajectory. `release_recorder` records those samples.
+- The MPO `scarfinder!` supports `history`, `observe` and refinement.
+- `rand_iMPS(rng, T, n, d, dim)` and `translate(ψ, k)`.
+
+### Removed
+
+- Removed the experimental `ScarFinderPlan`, `projected_energy_density`, and
+  MPO ScarFinder options `repair`, `max_project`, `leak_tol`, `projected_energy`,
+  `constraint`, `gate_map`, `max_rejections` and `evolve_truncerr`, along with
+  their repair, leakage, projected energy and evolution diagnostics.
+  MPO `scarfinder_step!` returns `(loss, energy_error, converged)`.
+- Removed `gate_map`, `max_rejections`, `status`, `initial_residual` and
+  `rejected` from MPO `energy_fix!`. The PXP measurements found that repair
+  and projector-folded imaginary time brought no improvement, stalled
+  corrections in 9–37% of iterations and took 2–3× as long. The production loop
+  uses `trotter_mpos` with `gate_map` for the real-time window, followed by
+  truncation and ordinary imaginary time.
+
+### Fixed
+
+- MPO evolution merges adjacent step boundaries in the order the operators
+  act. Mixed transfer solves use a fixed unstructured seed so that virtual
+  gauges do not hide the dominant eigenvalue.
+- `apply!` is transactional and throws `MPOAnnihilationError` for zero
+  projections, including nilpotent cells. The annihilation test distinguishes
+  small finite weights on long cells from roundoff. `Blockade` transfer
+  rescales per site to prevent underflow.
+- `apply!(…; renormalize=true, recanonicalize=false)` normalizes the state and
+  the stored Schmidt spectra.
+- The controlled-layer fast path follows the stored MPO tensors, including
+  construction cutoff, and falls back after an in-place tensor edit.
+- The MPO driver uses the MPO step, rejects a positional matrix density
+  and validates Hamiltonian term sizes before mutating the state.
+  `CanonicalFormError` identifies non-converged canonicalization.
+
 ### Notes
 
 - `apply!` follows Orús–Vidal (contract, canonicalize, truncate all bonds) with
@@ -141,3 +75,6 @@ Layer MPOs and ScarFinder building blocks. The existing API is unchanged.
   are resolved to ~1e-15 relative; the fixed-point `canonical!` resolves ~1e-8.
 - `truncate_unitcell!` is unchanged; its docstring now contrasts it with
   `truncate!`.
+- Intermediate imaginary-time layers skip regauging. Generic canonicalization
+  builds QR/LQ isometries on demand. MPO saturation statistics count Schmidt
+  values at or above the truncation floor.

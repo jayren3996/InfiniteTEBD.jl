@@ -30,7 +30,6 @@ include("ScarFinder.jl")
 include("MPO.jl")
 include("ControlledLayer.jl")
 include("Constraint.jl")
-include("ScarFinderPlan.jl")
 include("SymmetricStubs.jl")
 
 #---------------------------------------------------------------------------------------------------

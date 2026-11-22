@@ -1,7 +1,7 @@
 #---------------------------------------------------------------------------------------------------
-# Constraint diagnostics: nearest-neighbour blockade and projected observables
+# Constraint diagnostics: nearest-neighbour blockade
 #---------------------------------------------------------------------------------------------------
-export Blockade, projected_energy_density
+export Blockade
 
 """
     Blockade(; occupied=2)
@@ -11,19 +11,9 @@ with `n = |occupied⟩⟨occupied|` (basis index `occupied`, `2` = `|1⟩` for s
 It forbids two adjacent sites from both being in state `occupied`; any local
 dimension is allowed.
 
-Pass it wherever a constraint projector is accepted (`constraint_leakage`,
-`projected_energy_density`, `scarfinder_step!(…; constraint)`). Because the
-projector is identified explicitly, these use an exact classical
-representation instead of a general projector MPO:
-
-- leakage: the probability `⟨ψ|P|ψ⟩` per cell is the spectral radius of a
-  completely positive transfer map on two environments labelled by the
-  previous site's occupation, a sum of non-negative terms (no cancellation), so
-  small weights keep their relative accuracy, and exact annihilation is an
-  exact zero;
-- projection: `P|ψ⟩` is formed by copying blocks of `ψ`'s tensors into a
-  bond of twice the dimension (the 0/1 automaton of the blockade), without
-  arithmetic.
+[`constraint_leakage`](@ref) computes the blockade probability from a positive
+transfer on two environments labelled by the previous site's occupation.
+This sum of non-negative terms retains the relative accuracy of small weights.
 
 `iMPO(b, n; d=2)` gives the same projector as a general layer MPO, for
 comparison or for code that needs an `iMPO`.
@@ -45,9 +35,6 @@ function iMPO(b::Blockade, n::Integer; d::Integer=2)
     return layer_mpo([(edge, k, k + 1) for k in 1:n], n; d, structured=false)
 end
 
-const _Constraint = Union{iMPO,Blockade}
-
-_check_constraint(ψ::iMPS, P::iMPO) = _check_mpo_state(ψ, P)
 function _check_constraint(ψ::iMPS, b::Blockade)
     ψ isa DenseIMPS || throw(ArgumentError("Blockade diagnostics support dense iMPS states"))
     for i in 1:ψ.n
@@ -197,70 +184,3 @@ function constraint_leakage(ψ::iMPS, b::Blockade)
     logw = _blockade_log_weight(ψ, b)
     return isfinite(logw) ? max(-logw / (2ψ.n), 0.0) : Inf
 end
-
-# --- projection ------------------------------------------------------------------------------
-
-# P|ψ⟩ as an exact iMPS: bond index (label q, χ index) with q = occupation of the site to
-# the left of the bond, χ index fastest. Entries are copied, not computed.
-function _blockade_project(ψ::DenseIMPS, b::Blockade)
-    occ = b.occupied
-    T = eltype(ψ)
-    Γ = Vector{Array{T,3}}(undef, ψ.n)
-    λ = similar(ψ.λ)
-    for i in 1:ψ.n
-        B = ψ.Γ[i]
-        l, d, r = size(B)
-        C = zeros(T, 2l, d, 2r)
-        for s in 1:d
-            q = s == occ ? 1 : 0
-            for p in 0:1
-                (p == 1 && s == occ) && continue
-                C[p*l+1:(p+1)*l, s, q*r+1:(q+1)*r] = view(B, :, s, :)
-            end
-        end
-        Γ[i] = C
-        λ[i] = vcat(ψ.λ[i], ψ.λ[i])            # placeholder sizes only
-    end
-    return iMPS(Γ, λ, ψ.n)
-end
-
-# Normalized canonical P|ψ⟩ with no truncation. Throws MPOAnnihilationError if Pψ = 0.
-function _normalized_projection(ψ::DenseIMPS, b::Blockade)
-    isfinite(_blockade_log_weight(ψ, b)) || throw(MPOAnnihilationError(
-        "the blockade projection of the state is exactly zero"))
-    φ = _blockade_project(ψ, b)
-    _precise_canonical!(φ)
-    return φ
-end
-
-function _normalized_projection(ψ::DenseIMPS, P::iMPO)
-    φ = _contract_mpo(ψ, P)
-    lognorm = _precise_canonical!(φ)
-    _annihilated(lognorm, ψ, P) && throw(MPOAnnihilationError(
-        "the projector maps the state to zero (norm per cell at the roundoff level)"))
-    return φ
-end
-
-"""
-    projected_energy_density(ψ, P, terms; n=ψ.n)
-
-Energy density of the normalized projection `P|ψ⟩ / ‖P|ψ⟩‖`, the physical
-component of `ψ` for a constraint projector `P` (an [`iMPO`](@ref) projector or a
-[`Blockade`](@ref)), measured with `energy_density(·, terms; n)`.
-
-The projection is exact: `P|ψ⟩` keeps its full bond dimension (at most
-`bonddim(P) · χ`, minus exact null directions) and is not truncated back to `χ`,
-so the value is not contaminated by a truncation. `ψ` is not modified.
-
-Throws `MPOAnnihilationError` when `P|ψ⟩ = 0`: the projected energy is then
-undefined. For a `Blockade` this is decided exactly (an exact zero of the
-positive transfer); for a general projector `iMPO` by the roundoff test of
-[`apply!`](@ref).
-"""
-function projected_energy_density(ψ::iMPS, P::_Constraint, terms::AbstractVector; n::Integer=ψ.n)
-    _check_constraint(ψ, P)
-    return energy_density(_normalized_projection(ψ, P), terms; n)
-end
-
-_check_constraint(::iMPS, c) = throw(ArgumentError(
-    "constraint must be a projector iMPO or a Blockade, got $(typeof(c))"))
