@@ -28,6 +28,17 @@
   `evolve_saturated`, `evolve_structured`, `leakage_evolved`,
   `leakage_projected`, `leakage_fixed`, `energy_fix_steps`; options
   `constraint` and `evolve_truncerr` (opt-in). `constraint_leakage`.
+- `Blockade`: the nearest-neighbour blockade as an explicit constraint, with
+  a positive-transfer `constraint_leakage` (exact for small weights, invariant
+  under tiling and rescaling) and an exact block-copy projection;
+  `iMPO(::Blockade, n)` gives the equivalent projector MPO.
+- `projected_energy_density(ψ, P, terms)` and `scarfinder_step!(…;
+  projected_energy=true)` (`energy_projected`, `energy_projected_error`): the
+  energy of the normalized physical component `Pψ/‖Pψ‖` of the returned
+  candidate. Opt-in; the loss and the ranking are unchanged.
+- `scarfinder_step!` validates all static inputs (constraint compatibility,
+  `target`, `terms`, energy-correction and truncation parameters) before it
+  modifies the state.
 
 ### Changed
 

@@ -150,6 +150,41 @@ for k in 1:30
 end
 ```
 
+### Constraint diagnostics and the energy of the physical component
+
+A truncated candidate generally leaks out of the blockade subspace, and the
+energy correction fixes the energy of the whole state `ψ`, not of its legal
+component `Pψ`. The next P3-folded window removes the illegal part, so the state
+that is actually evolved further can have a different energy. With
+`projected_energy=true`, `scarfinder_step!` also reports the energy density of
+`Pψ/‖Pψ‖` for the returned candidate (exact projection, no truncation back to
+`χ`):
+
+```julia
+r = scarfinder_step!(psi, U, 2; nstep=20, maxdim=16, terms, target=e, tol=1e-10,
+                     constraint=Blockade(), projected_energy=true)
+r.energy_error             # E(ψ) − target: what the energy correction controls
+r.energy_projected_error   # E(Pψ/‖Pψ‖) − target: the physical component
+```
+
+In a six-seed PXP test with `tol=1e-10`, `|energy_error| ≤ 4e-12` while the
+projected residuals were `2e-4` to `4e-3`. `energy_projected` is `NaN` when
+`Pψ = 0`; the standalone [`projected_energy_density`](@ref) throws
+`MPOAnnihilationError` then. Neither changes the loss or the ranking.
+
+`constraint` accepts a projector `iMPO` (any constraint) or a
+[`Blockade`](@ref). For the blockade, `constraint_leakage` uses the probability
+`⟨ψ|P|ψ⟩` as the spectral radius of a positive transfer on two environments
+labelled by the previous occupation. It is a sum of non-negative terms, so small
+weights keep their relative accuracy, the value does not depend on the cell
+length or the normalization of `ψ`, and exact annihilation is an exact zero.
+The generic projector path can fail on such states: it misses convergence of
+the canonical form, or returns `Inf` for long cells. The blockade projection
+`Pψ` itself is built by copying tensor blocks (the 0/1 automaton), with no
+arithmetic. Near full packing, a uniform state projects to an almost two-fold
+crystal; the leakage stays accurate there, but the canonical form of `Pψ` (and
+hence `projected_energy_density`) converges slowly or not at all.
+
 ## Limitations
 
 - Overlapping gates in one layer must commute, and each bond may be crossed by

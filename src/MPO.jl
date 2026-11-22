@@ -1311,6 +1311,25 @@ function _bond_crossings_ok(terms, n, d)
     return true
 end
 
+# Validation of everything `energy_fix!` checks before touching the state; returns
+# (layers, terms). Also used by `scarfinder_step!` before its evolution window.
+function _energy_fix_setup(ψ, terms_or_layers, χ; target, tol, alpha, maxstep, n, cutoff, d)
+    isfinite(target) || throw(ArgumentError("target must be finite"))
+    isfinite(tol) && tol > 0 || throw(ArgumentError("tol must be finite and positive"))
+    isfinite(alpha) && alpha >= 0 || throw(ArgumentError("alpha must be finite and nonnegative"))
+    maxstep >= 0 || throw(ArgumentError("maxstep must be nonnegative"))
+    _validate_mpo_truncation(χ, cutoff, 0.0)
+    ψ.n % n == 0 || throw(ArgumentError("ψ.n = $(ψ.n) must be a multiple of the term period n = $n"))
+    layers, terms = _layers_and_terms(terms_or_layers, n, d)
+    for (h, _, _) in terms
+        ishermitian(h) || throw(ArgumentError("energy_fix! requires Hermitian terms"))
+    end
+    for layer in layers
+        check_commuting(layer; n, d)
+    end
+    return layers, terms
+end
+
 """
     energy_fix!(ψ, terms_or_layers, χ; target, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n, cutoff=SVDTOL)
 
@@ -1340,19 +1359,9 @@ function energy_fix!(ψ::iMPS, terms_or_layers, χ::Integer; target::Real, tol::
                      alpha::Real=0.1, maxstep::Integer=50, n::Integer=ψ.n,
                      cutoff::Real=SVDTOL, d::Union{Nothing,Integer}=nothing,
                      structured::Bool=true)
-    isfinite(target) || throw(ArgumentError("target must be finite"))
-    isfinite(tol) && tol > 0 || throw(ArgumentError("tol must be finite and positive"))
-    isfinite(alpha) && alpha >= 0 || throw(ArgumentError("alpha must be finite and nonnegative"))
-    maxstep >= 0 || throw(ArgumentError("maxstep must be nonnegative"))
-    _validate_mpo_truncation(χ, cutoff, 0.0)
     dd = isnothing(d) ? size(ψ.Γ[1], 2) : d
-    layers, terms = _layers_and_terms(terms_or_layers, n, dd)
-    for (h, _, _) in terms
-        ishermitian(h) || throw(ArgumentError("energy_fix! requires Hermitian terms"))
-    end
-    for layer in layers
-        check_commuting(layer; n, d=dd)
-    end
+    layers, terms = _energy_fix_setup(ψ, terms_or_layers, χ; target, tol, alpha, maxstep, n,
+                                      cutoff, d=dd)
     spectra = IdDict{Any,Tuple{Float64,Float64}}()
     for (h, _, _) in terms
         get!(spectra, h) do
@@ -1417,7 +1426,9 @@ annihilates `ψ`. `ψ` is not modified.
 
 `P` must be a projector (e.g. the blockade `∏(1 − n_j n_{j+1})` built with
 [`layer_mpo`](@ref)); the formula is not meaningful for other operators. The
-projection is computed without truncation.
+projection is computed without truncation. For the nearest-neighbour
+blockade prefer `constraint_leakage(ψ, Blockade())`, which needs no projection and
+keeps small weights accurate; see [`Blockade`](@ref).
 """
 function constraint_leakage(ψ::iMPS, P::iMPO)
     _check_mpo_state(ψ, P)
@@ -1434,7 +1445,7 @@ function constraint_leakage(ψ::iMPS, P::iMPO)
 end
 
 """
-    scarfinder_step!(ψ, mpos::Vector{<:iMPO}, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n=first(mpos).n, constraint=nothing, structured=true, evolve_truncerr=0.0)
+    scarfinder_step!(ψ, mpos::Vector{<:iMPO}, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n=first(mpos).n, constraint=nothing, structured=true, evolve_truncerr=0.0, projected_energy=false)
 
 One ScarFinder iteration with layer MPOs:
 
@@ -1466,9 +1477,10 @@ when `maxdim` is close to `χ`, the intermediate truncations already project the
 state and `loss` can be ≈ 0 for every candidate. As a rule of thumb, trust a
 loss only when `evolve_discarded_sum ≪ loss`; otherwise increase `maxdim`.
 
-Constraint diagnostics, with `constraint = P` a projector [`iMPO`](@ref) (e.g. the
-PXP blockade), from [`constraint_leakage`](@ref) (per site, same normalization as
-`loss`; `nothing` without `constraint`):
+Constraint diagnostics, with `constraint = P` a projector [`iMPO`](@ref) or a
+[`Blockade`](@ref) (the PXP blockade; faster and exact for small weights), from
+[`constraint_leakage`](@ref) (per site, same normalization as `loss`; `nothing`
+without `constraint`):
 
 - `leakage_evolved`: after the evolution window, before the final projection.
 - `leakage_projected`: after the final projection, **before** energy correction.
@@ -1477,6 +1489,23 @@ PXP blockade), from [`constraint_leakage`](@ref) (per site, same normalization a
 A projector folded into the evolution (e.g. `gate_map = G -> P3 * G`) removes the
 leaked weight in the next window and renormalizes, so that weight is not part of
 `loss`.
+
+Energy of the physical component (opt-in, `projected_energy=true`; needs
+`constraint` and `terms`), measured on the **returned candidate** (after energy
+correction when `target` is given):
+
+- `energy_projected`: energy density of `Pψ/‖Pψ‖`, from
+  [`projected_energy_density`](@ref) — the projection is exact, at the full
+  bond dimension of `Pψ`, not truncated back to `χ`. `NaN` when `Pψ = 0`
+  (undefined; `leakage_fixed`/`leakage_projected` is then `Inf`).
+- `energy_projected_error`: `energy_projected − target` (`nothing` without
+  `target`, `NaN` when undefined).
+
+`energy_error` is the residual of the whole state `ψ`, which is what the energy
+correction controls. When `ψ` leaks out of the constrained subspace, the
+component that survives `P` (e.g. in the next P3-folded window) can miss the
+target by much more; compare `energy_projected_error` with `tol`. Neither field
+changes the loss, the ranking or the feedback map.
 
 - `energy_fix_steps`: number of energy-correction trials (`0` without `target`).
 - `evolve_structured`: how many of the window's MPO applications used the
@@ -1497,6 +1526,9 @@ Options:
 `terms` (site-dependent `(h, i, j)`, or layers) is required with `target`, and
 is repeated with period `n`.
 
+All static inputs (`mpos`, `constraint`, `target`, `terms`, `tol`, `alpha`,
+`maxstep`, truncation parameters) are validated before `ψ` is modified.
+
 Example (see the README for the staggered PXP chain):
 ```julia
 r = scarfinder_step!(psi, U, 2; nstep=20, maxdim=16, terms, target=e, constraint=blockade)
@@ -1508,11 +1540,27 @@ function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integ
                           terms=nothing, target::Union{Nothing,Real}=nothing,
                           tol::Real=1e-6, alpha::Real=0.1, maxstep::Integer=50,
                           n::Integer=isempty(mpos) ? ψ.n : first(mpos).n,
-                          constraint::Union{Nothing,iMPO}=nothing, structured::Bool=true,
-                          evolve_truncerr::Real=0.0)
+                          constraint=nothing, structured::Bool=true,
+                          evolve_truncerr::Real=0.0, projected_energy::Bool=false)
+    # Static inputs are validated before the state is touched.
     _validate_mpo_truncation(χ, cutoff, 0.0)
+    _validate_mpo_truncation(maxdim, cutoff, evolve_truncerr)
+    nstep >= 0 || throw(ArgumentError("nstep must be non-negative"))
+    foreach(W -> _check_mpo_state(ψ, W), mpos)
     !isnothing(target) && isnothing(terms) &&
         throw(ArgumentError("supply `terms` when setting `target`"))
+    isnothing(constraint) || _check_constraint(ψ, constraint)
+    if projected_energy
+        isnothing(constraint) && throw(ArgumentError("projected_energy=true needs a `constraint`"))
+        isnothing(terms) && throw(ArgumentError("projected_energy=true needs `terms`"))
+    end
+    if !isnothing(target)
+        _energy_fix_setup(ψ, terms, χ; target, tol, alpha, maxstep, n, cutoff,
+                          d=size(ψ.Γ[1], 2))
+    elseif !isnothing(terms)
+        ψ.n % n == 0 || throw(ArgumentError("ψ.n = $(ψ.n) must be a multiple of the term period n = $n"))
+        _layers_and_terms(terms, n, size(ψ.Γ[1], 2))
+    end
     _warn_scarfinder_nstep(nstep, :gate)
     _, est = evolve!(ψ, mpos, nstep; maxdim, cutoff, truncerr=evolve_truncerr, return_stats=true,
                      structured)
@@ -1529,11 +1577,23 @@ function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integ
         energy_error, converged, steps = result.residual, result.converged, result.steps
         leakage_fixed = leak(ψ)
     end
+    energy_projected = energy_projected_error = nothing
+    if projected_energy
+        _, term_list = _layers_and_terms(terms, n, size(ψ.Γ[1], 2))
+        energy_projected = try
+            projected_energy_density(ψ, constraint, term_list; n)
+        catch err
+            err isa MPOAnnihilationError || rethrow()
+            NaN                                   # P ψ = 0: undefined
+        end
+        isnothing(target) || (energy_projected_error = energy_projected - target)
+    end
     return (loss=loss, energy_error=energy_error, converged=converged,
             evolve_max_discarded=est.max_discarded_weight,
             evolve_discarded_sum=sum((u.max_discarded_weight for u in est.updates); init=0.0),
             evolve_saturated=est.num_saturated,
             evolve_structured=est.num_structured,
             leakage_evolved=leakage_evolved, leakage_projected=leakage_projected,
-            leakage_fixed=leakage_fixed, energy_fix_steps=steps)
+            leakage_fixed=leakage_fixed, energy_fix_steps=steps,
+            energy_projected=energy_projected, energy_projected_error=energy_projected_error)
 end
