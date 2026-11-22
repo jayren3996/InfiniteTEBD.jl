@@ -1,6 +1,32 @@
 # Changelog
 
-## Unreleased
+## Unreleased (after v0.3.0-rc1)
+
+### Fixed
+
+- `scarfinder!(ψ, mpos::Vector{<:iMPO}, χ, N)` reached the legacy gate-list
+  driver (different final truncation, no `terms`/`target`/`constraint`). It now
+  runs `N` calls of the MPO `scarfinder_step!` (optional `history`) and then the
+  refinement scan. A matrix density with an MPO sequence is an `ArgumentError`.
+- The controlled-layer fast path read its control blocks from the input gate,
+  not from the stored (possibly cutoff-truncated) MPO, and kept using them after
+  an in-place edit of `W[i]`. The structure is now read from the stored pieces,
+  and is used only while the tensors equal a snapshot taken at construction
+  (copies and merged products inherit it only in that case).
+- Annihilation detection rejected valid states on long cells (identity on 78+
+  sites). A positive screen is now confirmed against the absolute-value
+  contraction `|W|·|ψ|`. The `Blockade` transfer rescales per site and no longer
+  underflows on long tiled cells with small weights.
+- `scarfinder_step!` validated term sizes only when `target` was given; it now
+  always validates them before modifying the state.
+
+### Added
+
+- `CanonicalFormError` for non-converged canonical forms (was `ErrorException`).
+- `scarfinder_step!` field `energy_projected_status` (`:ok`, `:annihilated`,
+  `:unconverged`); the optional projected-energy diagnostic no longer throws.
+
+## v0.3.0-rc1
 
 ### Fixed
 

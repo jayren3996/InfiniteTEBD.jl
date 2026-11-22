@@ -27,6 +27,7 @@ const TEST_GROUPS = Dict(
         "test_layer_mpo.jl",
         "test_controlled_layer.jl",
         "test_constraint_diagnostics.jl",
+        "test_release_blockers.jl",
     ],
     "api" => [
         "test_truncation_control.jl",

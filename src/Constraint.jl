@@ -60,50 +60,51 @@ end
 
 # --- positive transfer -----------------------------------------------------------------------
 
-# Spectral radius of a linear map `f` on vectors of length `m` that preserves the cone of
-# positive semidefinite matrices, started from the positive definite `x0`. Returns its log
-# (`-Inf` when the map annihilates `x0`, i.e. when the radius is exactly zero).
+# Spectral radius of the cell map `x ↦ sites[n](⋯ sites[1](x))`, a product of linear site
+# maps that preserve positive semidefinite matrices, started from the positive definite
+# `x0`. Returns its log (`-Inf` when the map annihilates `x0`, i.e. the radius is exactly 0).
 #
-# The map is rescaled by a power-iteration estimate before Arnoldi, so the eigensolver
-# tolerance is relative to the radius, however small it is. Small maps use a dense,
-# balanced eigenvalue computation.
+# Each site map is divided by a fixed scale σᵢ taken from per-site-normalized power
+# iterations, so the scaled cell map has radius ~1 for any cell length (no underflow when a
+# small weight per site is repeated over a long cell) and the eigensolver tolerance is
+# relative. log ρ = Σᵢ log σᵢ + log ρ(scaled). Small maps use a dense, balanced eigenvalue
+# computation.
 const _POSITIVE_DENSE_MAX = 64
 const _POSITIVE_WARMUP = 4
 
-function _log_positive_radius(f, x0::AbstractVector)
+_log_positive_radius(f, x0::AbstractVector) = _log_positive_radius([f], x0)
+
+function _log_positive_radius(sites::AbstractVector, x0::AbstractVector)
     x = x0 ./ norm(x0)
-    logscale = 0.0
-    for _ in 1:_POSITIVE_WARMUP
+    logσ = zeros(length(sites))
+    for _ in 1:_POSITIVE_WARMUP, (i, f) in enumerate(sites)
         y = f(x)
         s = norm(y)
         iszero(s) && return -Inf
         isfinite(s) || throw(ArgumentError("constraint transfer: non-finite values"))
         x = y ./ s
-        logscale = log(s)
+        logσ[i] = log(s)
     end
-    ρ0 = exp(logscale)
+    σ = exp.(logσ)
+    cell(v) = foldl((u, (f, c)) -> f(u) ./ c, zip(sites, σ); init=v)
     m = length(x0)
     if m <= _POSITIVE_DENSE_MAX
         M = Matrix{eltype(x)}(undef, m, m)
         e = zeros(eltype(x), m)
         for k in 1:m
             e[k] = 1
-            M[:, k] = f(e) ./ ρ0
+            M[:, k] = cell(e)
             e[k] = 0
         end
         r = maximum(abs, eigvals!(M); init=0.0)
     else
-        vals, _, info = eigsolve(v -> f(v) ./ ρ0, x, 1, :LM; ishermitian=false, tol=1e-13,
+        vals, _, info = eigsolve(cell, x, 1, :LM; ishermitian=false, tol=1e-13,
                                  krylovdim=min(m, 30), maxiter=200)
-        if info.converged < 1
-            # Fall back to plain power iteration on the Perron vector (positive map).
-            r = _positive_power(v -> f(v) ./ ρ0, x)
-        else
-            r = abs(vals[1])
-        end
+        # Plain power iteration on the Perron vector if Arnoldi does not converge.
+        r = info.converged < 1 ? _positive_power(cell, x) : abs(vals[1])
     end
     iszero(r) && return -Inf
-    return logscale + log(r)
+    return sum(logσ) + log(r)
 end
 
 # Power iteration with two-step ratios (robust to a period-2 peripheral spectrum).
@@ -127,49 +128,45 @@ _site_blocks(A) = [Matrix(view(A, :, s, :)) for s in 1:size(A, 2)]
 
 # log ⟨ψ|P|ψ⟩ per cell for the blockade, relative to log ⟨ψ|ψ⟩ per cell (≤ 0; -Inf if P
 # annihilates ψ). Left environments L₀/L₁ are labelled by whether the previous site is
-# occupied: L₀′ = Σ_{s≠occ} B_s†(L₀+L₁)B_s, L₁′ = B_occ† L₀ B_occ.
+# occupied: L₀′ = Σ_{s≠occ} B_s†(L₀+L₁)B_s, L₁′ = B_occ† L₀ B_occ. The vector holds
+# (vec L₀, vec L₁).
 function _blockade_log_weight(ψ::DenseIMPS, b::Blockade)
     blocks = [_site_blocks(A) for A in ψ.Γ]
     occ = b.occupied
     T = eltype(ψ)
-    χ = size(ψ.Γ[1], 1)
-    k = χ^2
-    # buffers: environments entering each site, and B†L products
-    envs = [(zeros(T, size(A, 1), size(A, 1)), zeros(T, size(A, 1), size(A, 1))) for A in ψ.Γ]
-    S = [zeros(T, size(A, 1), size(A, 1)) for A in ψ.Γ]
-    tmp = [zeros(T, size(A, 3), size(A, 1)) for A in ψ.Γ]
-    function cell(v)
-        L0, L1 = envs[1]
-        copyto!(L0, 1, v, 1, k)
-        copyto!(L1, 1, v, k + 1, k)
-        out = similar(v)
-        for (i, Bs) in enumerate(blocks)
-            L0, L1 = envs[i]
-            last = i == length(blocks)
-            N0, N1 = last ? (zeros(T, χ, χ), zeros(T, χ, χ)) : envs[i+1]
-            S[i] .= L0 .+ L1
-            fill!(N0, 0)
+    function site_map(Bs)
+        l, r = size(Bs[1])
+        S = zeros(T, l, l)
+        tmp = zeros(T, r, l)
+        return function (v)
+            L0 = reshape(view(v, 1:l^2), l, l)
+            L1 = reshape(view(v, l^2+1:2l^2), l, l)
+            out = zeros(T, 2r^2)
+            N0 = reshape(view(out, 1:r^2), r, r)
+            N1 = reshape(view(out, r^2+1:2r^2), r, r)
+            S .= L0 .+ L1
             for s in eachindex(Bs)
-                Bs_ = Bs[s]
                 if s == occ
-                    mul!(tmp[i], Bs_', L0)
-                    mul!(N1, tmp[i], Bs_)
+                    mul!(tmp, Bs[s]', L0)
+                    mul!(N1, tmp, Bs[s])
                 else
-                    mul!(tmp[i], Bs_', S[i])
-                    mul!(N0, tmp[i], Bs_, true, true)
+                    mul!(tmp, Bs[s]', S)
+                    mul!(N0, tmp, Bs[s], true, true)
                 end
             end
-            if last
-                copyto!(out, 1, N0, 1, k)
-                copyto!(out, k + 1, N1, 1, k)
-            end
+            return out
         end
-        return out
     end
+    self_map(Bs) = v -> begin
+        l, r = size(Bs[1])
+        L = reshape(v, l, l)
+        vec(sum(B' * L * B for B in Bs))
+    end
+    χ = size(ψ.Γ[1], 1)
     Id = vec(Matrix{T}(I, χ, χ))
-    lognorm = _right_canonical(blocks) ? 0.0 : _log_positive_radius(v -> _self_cell(blocks, v, χ), Id)
+    lognorm = _right_canonical(blocks) ? 0.0 : _log_positive_radius(self_map.(blocks), Id)
     isfinite(lognorm) || throw(ArgumentError("constraint_leakage: the state has zero norm"))
-    logw = _log_positive_radius(cell, vcat(Id, Id))
+    logw = _log_positive_radius(site_map.(blocks), vcat(Id, Id))
     return min(logw - lognorm, 0.0)
 end
 
@@ -184,14 +181,6 @@ function _right_canonical(blocks)
         norm(G - I, Inf) <= _RIGHT_CANONICAL_TOL || return false
     end
     return true
-end
-
-function _self_cell(blocks, v, χ)
-    L = reshape(v, χ, χ)
-    for Bs in blocks
-        L = sum(B' * L * B for B in Bs)
-    end
-    return vec(L)
 end
 
 """

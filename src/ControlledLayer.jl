@@ -36,7 +36,8 @@ function _detect_controlled_center(terms, n, d)
     for i1 in 1:2, i2 in 1:2, i3 in 1:2, o1 in 1:2, o2 in 1:2, o3 in 1:2
         v = T[o3, o2, o1, i3, i2, i1]
         if o1 == i1 && o3 == i3
-            M[o2, i2, o1, o3] = v
+            # entries at the roundoff level of the stored pieces are exact zeros of the gate
+            M[o2, i2, o1, o3] = abs(v) > _CONTROLLED_DETECT_TOL * scale ? v : zero(v)
         elseif abs(v) > _CONTROLLED_DETECT_TOL * scale
             return nothing
         end
@@ -56,7 +57,7 @@ end
 _merged_structure(::Any, ::Any) = nothing
 
 _controlled_eligible(ψ, W::iMPO, renormalize::Bool) =
-    !isnothing(W.structure) && renormalize && ψ isa DenseIMPS{ComplexF64} &&
+    !isnothing(_valid_structure(W)) && renormalize && ψ isa DenseIMPS{ComplexF64} &&
     ψ.n == 2 && W.n == 2 && all(A -> size(A, 2) == 2, ψ.Γ)
 
 # Sector representation of W·ψ: block-identity control tensor and the center tensor AT.

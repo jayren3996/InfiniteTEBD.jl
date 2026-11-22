@@ -183,7 +183,31 @@ the canonical form, or returns `Inf` for long cells. The blockade projection
 `Pψ` itself is built by copying tensor blocks (the 0/1 automaton), with no
 arithmetic. Near full packing, a uniform state projects to an almost two-fold
 crystal; the leakage stays accurate there, but the canonical form of `Pψ` (and
-hence `projected_energy_density`) converges slowly or not at all.
+hence `projected_energy_density`) converges slowly or not at all. The standalone
+function then throws `CanonicalFormError`; `scarfinder_step!` instead reports
+`energy_projected_status = :unconverged` (`:annihilated` when `Pψ = 0`, `:ok`
+otherwise), so the optional diagnostic never fails a step whose state has
+already advanced.
+
+### Several iterations
+
+`scarfinder!(ψ, mpos, χ, N; refine=false, kwargs...)` runs exactly `N` calls of
+`scarfinder_step!(ψ, mpos, χ; kwargs...)` with the same options (`terms`,
+`target`, `constraint`, `projected_energy`, …); pass `history=Any[]` to keep the
+named tuple of each iteration. With `refine=true` it then scans `refine_step`
+further steps for the minimum-entanglement point.
+
+## Annihilation and the fast path
+
+`apply!` throws `MPOAnnihilationError` only when the norm of `W·ψ` per cell is at
+the roundoff level of the contraction, measured against the same contraction
+with entrywise absolute values `|W|·|ψ|`. Identities and 0/1 projectors therefore
+never reject a finite (even very small) weight, for any cell length.
+
+The controlled-layer structure is read from the stored MPO tensors, so it
+follows a coarse construction `cutoff`. Editing a tensor in place through `W[i]`
+disables the fast path for that MPO, and for its copies and merged products;
+the generic update is then used.
 
 ## Limitations
 

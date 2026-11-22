@@ -9,6 +9,20 @@ export apply!, trotter_mpos, truncate!, energy_fix!, constraint_leakage, MPOAnni
 import ITensorMPS: truncate!
 
 """
+    CanonicalFormError
+
+Thrown when the QR/LQ iteration that restores the canonical form after an MPO
+application (or for a projected state) does not converge, typically for states
+with a very long correlation length. It signals a solver failure, not a
+property of the state.
+"""
+struct CanonicalFormError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::CanonicalFormError) = print(io, "CanonicalFormError: ", e.msg)
+export CanonicalFormError
+
+"""
     MPOAnnihilationError
 
 Thrown by [`apply!`](@ref) (and the MPO [`evolve!`](@ref)) when the MPO maps the
@@ -75,6 +89,9 @@ struct iMPO{T<:Number}
     # Optional layer structure retained from construction (`nothing` for general MPOs,
     # products and compressed MPOs). Only used to select a faster, equivalent update.
     structure::Union{Nothing,ControlledCenter}
+    # Copy of the tensors the structure was derived from. The structure is used only while
+    # `W` still equals it, so editing tensors through `W[i]` disables the fast path.
+    snapshot::Vector{Array{T,4}}
 
     function iMPO(W::Vector{Array{T,4}}, n::Integer,
                   structure::Union{Nothing,ControlledCenter}=nothing) where {T<:Number}
@@ -87,7 +104,8 @@ struct iMPO{T<:Number}
                 "size(W[$j], 1) = $(size(W[j], 1))"))
             all(isfinite, W[i]) || throw(ArgumentError("iMPO tensor W[$i] contains non-finite values"))
         end
-        return new{T}(W, Int(n), structure)
+        snapshot = isnothing(structure) ? Array{T,4}[] : [copy(A) for A in W]
+        return new{T}(W, Int(n), structure, snapshot)
     end
 end
 
@@ -100,7 +118,11 @@ end
 Base.eltype(::iMPO{T}) where {T} = T
 Base.length(W::iMPO) = W.n
 Base.getindex(W::iMPO, i::Integer) = W.W[mod1(i, W.n)]
-Base.copy(W::iMPO) = iMPO([copy(A) for A in W.W], W.n, W.structure)
+Base.copy(W::iMPO) = iMPO([copy(A) for A in W.W], W.n, _valid_structure(W))
+
+# The stored structure if it still describes the tensors (no edit since construction).
+_valid_structure(W::iMPO) =
+    !isnothing(W.structure) && W.W == W.snapshot ? W.structure : nothing
 
 """
     bonddims(W::iMPO)
@@ -278,6 +300,19 @@ function _gate_mpo_pieces(G::AbstractMatrix, d::Integer, L::Integer, cutoff::Rea
     return pieces
 end
 
+# Inverse of `_gate_mpo_pieces`: the L-site operator (kron convention) the pieces represent.
+function _contract_pieces(pieces, d)
+    L = length(pieces)
+    acc = reshape(pieces[1], d * d, size(pieces[1], 4))          # (o1 i1, r)
+    for p in 2:L
+        A = pieces[p]
+        acc = reshape(acc * reshape(A, size(A, 1), :), :, size(A, 4))   # ((o i)_1..p, r)
+    end
+    t = reshape(acc, ntuple(_ -> d, 2L))                         # (o1, i1, o2, i2, …)
+    perm = vcat([2(L - p) - 1 for p in 0:L-1], [2(L - p) for p in 0:L-1])
+    return reshape(permutedims(t, perm), d^L, d^L)
+end
+
 # W_new = P ∘ W (P acts after W); bonds fuse as (bond of W) fastest.
 function _compose_site(P::AbstractArray{<:Number,4}, W::AbstractArray{<:Number,4})
     @tensor C[lw, lp, o, i, rw, rp] := P[lp, o, m, rp] * W[lw, m, i, rw]
@@ -381,7 +416,12 @@ function layer_mpo(layer, n::Integer; cutoff::Real=MPO_CUTOFF, check::Bool=true,
         end
         W[c] = site
     end
-    return iMPO(W, n, structured ? _detect_controlled_center(terms, n, dd) : nothing)
+    # The structure is read from the stored pieces (not the input gate), so it describes the
+    # operator actually stored even when `cutoff` truncated the gate.
+    structure = structured && length(terms) == 1 ?
+        _detect_controlled_center([(_contract_pieces(pieces[1], dd), terms[1][2], terms[1][3])], n, dd) :
+        nothing
+    return iMPO(W, n, structure)
 end
 
 #---------------------------------------------------------------------------------------------------
@@ -720,8 +760,8 @@ function _right_orthonormalize(A; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
     done, best, since = _orth_progress(δ, Inf, 0, tol)
     iter = 1
     while !done
-        iter < maxiter || error("canonical form: right orthonormalization did not converge " *
-                                "in $maxiter sweeps (residual $δ)")
+        iter < maxiter || throw(CanonicalFormError("canonical form: right orthonormalization " *
+                                                   "did not converge in $maxiter sweeps (residual $δ)"))
         if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
             C = first(_pos_lq(_accelerate(map_for(_right_isometries(packs)), Cn, δ)))
             C ./= norm(C)
@@ -756,8 +796,8 @@ function _left_factors(B, D0; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
     done, best, since = _orth_progress(δ, Inf, 0, tol)
     iter = 1
     while !done
-        iter < maxiter || error("canonical form: left orthonormalization did not converge " *
-                                "in $maxiter sweeps (residual $δ)")
+        iter < maxiter || throw(CanonicalFormError("canonical form: left orthonormalization " *
+                                                   "did not converge in $maxiter sweeps (residual $δ)"))
         if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
             D = last(_pos_qr(_accelerate(map_for(_left_isometries(packs)), centers[end], δ)))
             D ./= norm(D)
@@ -1031,10 +1071,38 @@ function _annihilation_threshold(ψ, W::iMPO)
 end
 
 # `lognorm`: log norm per cell of W·ψ (unnormalized input scale). True if annihilated.
+#
+# The bound ε·∏‖Wᵢ‖ grows with the cell length (for the identity, (√d)ⁿ), so it only
+# screens. A positive screen is confirmed against the roundoff scale of the contraction
+# itself: the norm per cell of |W|·|ψ|, the same contraction with entrywise absolute
+# values (no cancellation). W·ψ is annihilated only if its norm is below ~ε times that.
+# For operators without cancellation (identity, 0/1 projectors) the two norms agree and a
+# small finite weight is never mistaken for zero, for any cell length.
 function _annihilated(lognorm, ψ, W::iMPO)
     threshold = _annihilation_threshold(ψ, W)
     lognorm >= threshold + 40 && return false           # far above: skip the norm of ψ
-    return lognorm - log(inner_product(ψ)) / 2 < threshold
+    lognorm - log(inner_product(ψ)) / 2 < threshold || return false
+    return lognorm < log(_ANNIHILATION_MARGIN * eps(Float64)) + _log_abs_contraction(ψ, W)
+end
+
+# log norm per cell of the contraction of |W| with |ψ| (entrywise absolute values).
+function _log_abs_contraction(ψ::DenseIMPS, W::iMPO)
+    maps = map(1:ψ.n) do i
+        A = abs.(W[i])
+        B = abs.(ψ.Γ[i])
+        @tensor C[a, l, o, b, r] := A[l, o, s, r] * B[a, s, b]
+        sz = size(C)
+        C3 = reshape(C, sz[1] * sz[2], sz[3], sz[4] * sz[5])
+        blocks = [Matrix(view(C3, :, o, :)) for o in 1:sz[3]]
+        v -> begin
+            k = size(blocks[1], 1)
+            L = reshape(v, k, k)
+            vec(sum(Bo' * L * Bo for Bo in blocks))
+        end
+    end
+    k = size(ψ.Γ[1], 1) * size(W[1], 1)
+    logρ = _log_positive_radius(maps, vec(Matrix{Float64}(I, k, k)))
+    return logρ / 2
 end
 
 # Transactional MPO application. `normalize_cells=false` skips the per-cell normalization of
@@ -1045,7 +1113,7 @@ function _apply_mpo!(ψ::iMPS, W::iMPO; maxdim, cutoff, truncerr, renormalize, r
     _validate_mpo_truncation(maxdim, cutoff, truncerr)
     _check_mpo_state(ψ, W)
     res = structured && _controlled_eligible(ψ, W, renormalize) ?
-        _apply_controlled(ψ, W.structure; maxdim, cutoff, truncerr, renormalize, recanonicalize) :
+        _apply_controlled(ψ, _valid_structure(W); maxdim, cutoff, truncerr, renormalize, recanonicalize) :
         nothing
     if isnothing(res)
         path = :generic
@@ -1132,7 +1200,7 @@ function trotter_mpos(layers, dt::Real; trotter::Symbol=:second, evolution::Symb
         push!(mpos, W)
     end
     T = mapreduce(eltype, promote_type, mpos)
-    return [W isa iMPO{T} ? W : iMPO([Array{T,4}(A) for A in W.W], W.n, W.structure) for W in mpos]
+    return [W isa iMPO{T} ? W : iMPO([Array{T,4}(A) for A in W.W], W.n, _valid_structure(W)) for W in mpos]
 end
 
 # Accept a merged boundary MPO only if it is no larger than the parts. In time order
@@ -1143,7 +1211,7 @@ function _merged_boundary(last_mpo::iMPO, first_mpo::iMPO)
     merged = mpo_multiply(first_mpo, last_mpo; compress=true)
     bound = max.(bonddims(last_mpo), bonddims(first_mpo))
     merged.n == last_mpo.n && all(bonddims(merged) .<= bound) || return nothing
-    structure = _merged_structure(first_mpo.structure, last_mpo.structure)
+    structure = _merged_structure(_valid_structure(first_mpo), _valid_structure(last_mpo))
     return isnothing(structure) ? merged : iMPO(merged.W, merged.n, structure)
 end
 
@@ -1500,6 +1568,10 @@ correction when `target` is given):
   (undefined; `leakage_fixed`/`leakage_projected` is then `Inf`).
 - `energy_projected_error`: `energy_projected − target` (`nothing` without
   `target`, `NaN` when undefined).
+- `energy_projected_status`: `:ok`, `:annihilated` (`Pψ = 0`, the projected
+  energy is undefined) or `:unconverged` (the canonical form of `Pψ` did not
+  converge, typically for very long correlation lengths); `nothing` when not
+  requested. Neither failure throws: the state returned is the candidate.
 
 `energy_error` is the residual of the whole state `ψ`, which is what the energy
 correction controls. When `ψ` leaks out of the constrained subspace, the
@@ -1561,6 +1633,12 @@ function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integ
         ψ.n % n == 0 || throw(ArgumentError("ψ.n = $(ψ.n) must be a multiple of the term period n = $n"))
         _layers_and_terms(terms, n, size(ψ.Γ[1], 2))
     end
+    if !isnothing(terms)                      # operator sizes and supports, as energy_density
+        _, term_list = _layers_and_terms(terms, n, size(ψ.Γ[1], 2))
+        for (h, i, j) in term_list
+            _support_span(h, i, j, n, size(ψ.Γ[1], 2))
+        end
+    end
     _warn_scarfinder_nstep(nstep, :gate)
     _, est = evolve!(ψ, mpos, nstep; maxdim, cutoff, truncerr=evolve_truncerr, return_stats=true,
                      structured)
@@ -1577,14 +1655,16 @@ function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integ
         energy_error, converged, steps = result.residual, result.converged, result.steps
         leakage_fixed = leak(ψ)
     end
-    energy_projected = energy_projected_error = nothing
+    energy_projected = energy_projected_error = energy_projected_status = nothing
     if projected_energy
+        # An optional diagnostic of a state that is already final: it never throws for a
+        # property of the state or a solver failure, it reports them.
         _, term_list = _layers_and_terms(terms, n, size(ψ.Γ[1], 2))
-        energy_projected = try
-            projected_energy_density(ψ, constraint, term_list; n)
+        energy_projected, energy_projected_status = try
+            projected_energy_density(ψ, constraint, term_list; n), :ok
         catch err
-            err isa MPOAnnihilationError || rethrow()
-            NaN                                   # P ψ = 0: undefined
+            err isa MPOAnnihilationError ? (NaN, :annihilated) :       # P ψ = 0: undefined
+            err isa CanonicalFormError ? (NaN, :unconverged) : rethrow()
         end
         isnothing(target) || (energy_projected_error = energy_projected - target)
     end
@@ -1595,5 +1675,50 @@ function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integ
             evolve_structured=est.num_structured,
             leakage_evolved=leakage_evolved, leakage_projected=leakage_projected,
             leakage_fixed=leakage_fixed, energy_fix_steps=steps,
-            energy_projected=energy_projected, energy_projected_error=energy_projected_error)
+            energy_projected=energy_projected, energy_projected_error=energy_projected_error,
+            energy_projected_status=energy_projected_status)
+end
+
+# A matrix density `h` belongs to the gate-list interface; MPO steps take `terms`.
+function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, h::AbstractMatrix, χ::Integer;
+                          kwargs...)
+    throw(ArgumentError("with MPOs, pass the Hamiltonian as `terms=[(h, i, j), …]`, " *
+                        "not as a matrix argument"))
+end
+
+"""
+    scarfinder!(ψ, mpos::Vector{<:iMPO}, χ, N; refine=true, refine_step=100, refine_mpos=mpos, history=nothing, kwargs...)
+
+`N` ScarFinder iterations with layer MPOs: exactly `N` calls of
+[`scarfinder_step!`](@ref)`(ψ, mpos, χ; kwargs...)` (same options: `nstep`,
+`maxdim`, `terms`, `target`, `constraint`, `projected_energy`, …), followed, if
+`refine=true`, by the minimum-entanglement scan of [`minimize_on_trajectory!`](@ref)
+over `refine_step` further steps with `refine_mpos`. With `refine=false` the
+result is identical to an explicit loop over `scarfinder_step!`.
+
+Pass a vector as `history` to collect the named tuple returned by each of the
+`N` main iterations (diagnostics included). Returns `ψ`.
+"""
+function scarfinder!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integer, N::Integer;
+                     refine::Bool=true, refine_step::Integer=100,
+                     refine_mpos::AbstractVector{<:iMPO}=mpos,
+                     history::Union{Nothing,AbstractVector}=nothing, kwargs...)
+    N >= 0 || throw(ArgumentError("N must be nonnegative"))
+    (!refine || refine_step >= 0) || throw(ArgumentError("refine_step must be nonnegative"))
+    for _ in 1:N
+        r = scarfinder_step!(ψ, mpos, χ; kwargs...)
+        isnothing(history) || push!(history, r)
+    end
+    if refine
+        step! = state -> scarfinder_step!(state, refine_mpos, χ; kwargs...)
+        minimize_on_trajectory!(_refinement_objective, step!, ψ, refine_step)
+    end
+    return ψ
+end
+
+function scarfinder!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, h::Union{Nothing,AbstractMatrix},
+                     χ::Integer, N::Integer; kwargs...)
+    isnothing(h) && return scarfinder!(ψ, mpos, χ, N; kwargs...)
+    throw(ArgumentError("with MPOs, pass the Hamiltonian as `terms=[(h, i, j), …]`, " *
+                        "not as a matrix argument"))
 end
