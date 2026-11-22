@@ -226,10 +226,56 @@ function rand_iMPS(
     d::Integer,
     dim::Integer
 )
-    Γ = [rand(T, dim, d, dim) for i=1:n]
-    iMPS(T, Γ; renormalize=true)
+    return rand_iMPS(default_rng(), T, n, d, dim)
 end
 rand_iMPS(n, d, dim) = rand_iMPS(Float64, n, d, dim)
+
+"""
+    rand_iMPS(rng::AbstractRNG, T, n, d, dim)
+
+Same as `rand_iMPS(T, n, d, dim)` with the tensors drawn from `rng`:
+`rand(rng, T, dim, d, dim)` per site, i.e. **uniform** entries (for complex `T`
+uniform real and imaginary parts in [0, 1)), then canonicalized. The method
+without `rng` uses the default RNG and is unchanged.
+
+This is not the complex Gaussian distribution `randn(rng, ComplexF64, …)` that
+some scripts use; to reproduce those seeds draw the tensors yourself and call
+`iMPS(T, Γ; renormalize=true)`. For reproducible runs derive one RNG per task
+from the task's identity, not from the scheduling order, e.g.
+`Xoshiro(hash((grid_point, seed_id)))`:
+
+```julia
+using Random
+rng = Xoshiro(hash((17, 3)))                                  # grid point 17, seed 3
+uniform = rand_iMPS(rng, ComplexF64, 2, 2, 2)                 # this method
+gauss = iMPS(ComplexF64, [randn(rng, ComplexF64, 2, 2, 2) for _ in 1:2]; renormalize=true)
+```
+"""
+function rand_iMPS(rng::AbstractRNG, T::DataType, n::Integer, d::Integer, dim::Integer)
+    Γ = [rand(rng, T, dim, d, dim) for i=1:n]
+    iMPS(T, Γ; renormalize=true)
+end
+
+export translate
+"""
+    translate(ψ, k)
+
+The state translated by `k` sites along the chain, as a new iMPS with
+independent arrays: `out.Γ[i] = ψ.Γ[mod1(i - k, n)]` and
+`out.λ[i] = ψ.λ[mod1(i - k, n)]` (each stored tensor `B = Γλ` moves with the
+Schmidt spectrum of its **right** bond), so the canonical form is kept. The
+content of site `j` of `ψ` ends up on site `j + k`; `k` may be negative, and
+`translate(ψ, n) == ψ` for a cell of `n` sites.
+
+For the staggered PXP chain, a one-site translation maps the Hamiltonian with
+detunings `(μ+δ, μ−δ)` to the one with `(μ−δ, μ+δ)`: at `δ ≠ 0` it is not a
+symmetry of a fixed grid point.
+"""
+function translate(ψ::iMPS, k::Integer)
+    n = ψ.n
+    idx = [mod1(i - k, n) for i in 1:n]
+    return iMPS([copy(ψ.Γ[j]) for j in idx], [copy(ψ.λ[j]) for j in idx], n)
+end
 #---------------------------------------------------------------------------------------------------
 export product_iMPS
 """

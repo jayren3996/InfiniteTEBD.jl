@@ -107,26 +107,50 @@ function _controlled_seeds(ψ, S, ct)
 end
 
 # Canonical form of the sector representation; `nothing` if the iteration does not converge.
+# Like `_right_orthonormalize`/`_left_factors`, a slowly converging iteration (small transfer
+# gap, e.g. near-crystal χ = 2 states) is accelerated by an Arnoldi step on the fixed-point
+# map of the seam factor; convergence is always decided by the same residual test.
 function _controlled_canonical(ψ, S, ct; tol=_ORTH_TOL, maxiter=_CONTROLLED_MAXITER[])
     AT, D, ids = ct.AT, ct.D, ct.ids
     C0, D0 = _controlled_seeds(ψ, S, ct)
     AT2 = reshape(AT, 2D, D)
     ATr = reshape(AT, D, 2D)
+    ATs = (AT[:, 1, :], AT[:, 2, :])
+    blocks = [a for a in 1:2 if !isempty(ids[a])]
     # right: through the center (dense LQ), then the control (block LQ)
     CT = RT = RC = nothing
     logc = 0.0
     done, best, since = false, Inf, 0
+    δ, δprev = Inf, Inf
     iter = 0
     while !done
         (iter += 1) > maxiter && return nothing
+        if iter > _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
+            Rs = (RT[:, 1, :], RT[:, 2, :])
+            Qs = [RC[ids[a], a, :] for a in 1:2]
+            map_right(X) = begin
+                Y = ATs[1] * X * Rs[1]' .+ ATs[2] * X * Rs[2]'
+                Z = zeros(eltype(Y), D, D)
+                for a in blocks
+                    Z[ids[a], ids[a]] = Y[ids[a], :] * Qs[a]'
+                end
+                Z
+            end
+            X = _accelerate(map_right, C0, δ)
+            C = zeros(eltype(C0), D, D)
+            for a in blocks
+                C[ids[a], ids[a]] = first(_pos_lq(X[ids[a], ids[a]]))
+            end
+            nC = norm(C)
+            (isfinite(nC) && nC > 0) && (C0 = C ./ nC)
+        end
         Lt, Q = _pos_lq(reshape(AT2 * C0, D, 2D))
         nt = _checked_norm(Lt)
         CT = Lt ./ nt
         RT = reshape(Q, D, 2, D)
         Lc = zeros(ComplexF64, D, D)
         RC = zeros(ComplexF64, D, 2, D)
-        for a in 1:2
-            isempty(ids[a]) && continue
+        for a in blocks
             f, q = _pos_lq(CT[ids[a], :])
             Lc[ids[a], ids[a]] = f
             RC[ids[a], a, :] = q
@@ -134,24 +158,46 @@ function _controlled_canonical(ψ, S, ct; tol=_ORTH_TOL, maxiter=_CONTROLLED_MAX
         nc = _checked_norm(Lc)
         Cn = Lc ./ nc
         logc = log(nt) + log(nc)
-        done, best, since = _orth_progress(norm(Cn - C0), best, since, tol)
+        δprev, δ = δ, norm(Cn - C0)
+        done, best, since = _orth_progress(δ, best, since, tol)
         C0 = Cn
     end
     # left: through the center (dense QR), then the control (block QR)
     DT = nothing
+    Qt = nothing
+    Qc = Vector{Matrix{ComplexF64}}(undef, 2)
     done, best, since = false, Inf, 0
+    δ, δprev = Inf, Inf
     iter = 0
     while !done
         (iter += 1) > maxiter && return nothing
-        Rt = last(_pos_qr(reshape(D0 * ATr, 2D, D)))
+        if iter > _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
+            Qts = (Qt[1:D, :], Qt[D+1:2D, :])
+            map_left(X) = begin
+                Y = Qts[1]' * X * ATs[1] .+ Qts[2]' * X * ATs[2]
+                Z = zeros(eltype(Y), D, D)
+                for a in blocks
+                    Z[ids[a], ids[a]] = Qc[a]' * Y[:, ids[a]]
+                end
+                Z
+            end
+            X = _accelerate(map_left, D0, δ)
+            Dn = zeros(eltype(D0), D, D)
+            for a in blocks
+                Dn[ids[a], ids[a]] = last(_pos_qr(X[ids[a], ids[a]]))
+            end
+            nD = norm(Dn)
+            (isfinite(nD) && nD > 0) && (D0 = Dn ./ nD)
+        end
+        Qt, Rt = _pos_qr(reshape(D0 * ATr, 2D, D))
         DT = Rt ./ _checked_norm(Rt)
         Rc = zeros(ComplexF64, D, D)
-        for a in 1:2
-            isempty(ids[a]) && continue
-            Rc[ids[a], ids[a]] = last(_pos_qr(DT[:, ids[a]]))
+        for a in blocks
+            Qc[a], Rc[ids[a], ids[a]] = _pos_qr(DT[:, ids[a]])
         end
         Dn = Rc ./ _checked_norm(Rc)
-        done, best, since = _orth_progress(norm(Dn - D0), best, since, tol)
+        δprev, δ = δ, norm(Dn - D0)
+        done, best, since = _orth_progress(δ, best, since, tol)
         D0 = Dn
     end
     FC = svd(D0 * CT)        # bond control → center

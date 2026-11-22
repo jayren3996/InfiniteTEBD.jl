@@ -1,6 +1,41 @@
 # Changelog
 
-## Unreleased (after v0.3.0-rc1)
+## Unreleased
+
+### Added (constrained ScarFinder workflow)
+
+- `energy_fix!(…; gate_map)` folds a map such as `G -> P3 * G` into the
+  imaginary-time gates; returns `status`, `initial_residual`, `rejected` besides
+  `(converged, residual, steps)`; a trial annihilated by a folded projector is a
+  rejected trial; opt-in `max_rejections`.
+- `scarfinder_step!`: `gate_map` for the correction, bounded post-SVD repair
+  (`repair`, `max_project`, `leak_tol`), `loss` measured after repair and
+  `loss_svd` after the initial SVD, and the fields `leakage_repaired`,
+  `project_steps`, `project_status`, `project_converged`,
+  `energy_initial_error`, `energy_fix_status`, `energy_fix_rejected`,
+  `evolve_at_cap`. Without `repair`, `constraint` stays diagnostic-only.
+- `ScarFinderPlan`: read-only validated layers, real-time MPOs, merged boundary
+  and spectra, shared by seeds; `scarfinder_step!(ψ, plan, χ)` and
+  `scarfinder!(ψ, plan, χ, N)` give the same numbers as the vector methods.
+- Observation: `evolve!(…; observe, every)` samples canonical states at whole
+  Trotter steps without changing the trajectory; `scarfinder!(…; observe)`;
+  `release_recorder`.
+- `rand_iMPS(rng, T, n, d, dim)`; `translate(ψ, k)`. `Random` is a dependency.
+
+### Changed
+
+- All static inputs of the step, including the bond-crossing rule for explicit
+  layers and the gate-map compatibility, are validated before the state changes.
+- `scarfinder_step!` truncates the (canonical) evolved state directly instead of
+  recanonicalizing it first, and energy-correction trials restore the canonical
+  gauge only after their last layer: same states up to roundoff (measured: same
+  trial counts, losses within 1e-10 over 430 iterations).
+- Faster: the annihilation screen uses the bound
+  `½ log ρ(E_self) ≤ Σ log‖Bᵢ‖_F` before any eigensolve; the controlled-layer
+  sector iteration is Arnoldi-accelerated when it converges slowly (fewer
+  fallbacks to the generic update).
+
+## Earlier unreleased changes (after v0.3.0-rc1)
 
 ### Fixed
 

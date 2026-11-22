@@ -11,6 +11,7 @@ export MAXDIM, SVDTOL, DenseIMPS, expect, ent_S
 # INCLUDE
 #---------------------------------------------------------------------------------------------------
 using LinearAlgebra, TensorOperations, KrylovKit
+using Random: AbstractRNG, default_rng
 using ITensors, ITensorMPS
 import Base: eltype, getindex, setindex!
 import LinearAlgebra: conj
@@ -29,6 +30,7 @@ include("ScarFinder.jl")
 include("MPO.jl")
 include("ControlledLayer.jl")
 include("Constraint.jl")
+include("ScarFinderPlan.jl")
 include("SymmetricStubs.jl")
 
 #---------------------------------------------------------------------------------------------------

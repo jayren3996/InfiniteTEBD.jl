@@ -28,6 +28,7 @@ const TEST_GROUPS = Dict(
         "test_controlled_layer.jl",
         "test_constraint_diagnostics.jl",
         "test_release_blockers.jl",
+        "test_scarfinder_workflow.jl",
     ],
     "api" => [
         "test_truncation_control.jl",
