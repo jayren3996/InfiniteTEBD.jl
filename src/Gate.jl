@@ -76,10 +76,10 @@ function tensor_applygate!(
     Γ = tensor_group(Γs)
     tensor_lmul!(λl, Γ)
     GΓ = tensor_umul(G, Γ)
-    tensor_decomp!(
+    _tensor_decomp!(
         GΓ,
         λl,
-        n;
+        [size(A, 2) for A in Γs];
         maxdim,
         mindim,
         truncerr,

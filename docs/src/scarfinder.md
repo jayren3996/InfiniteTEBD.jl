@@ -9,7 +9,7 @@ evolve!(ψ, U, nstep; maxdim)        # evolve off the manifold
 r = project!(ψ, χ; terms, target)   # back to bond dimension χ at energy density target
 ```
 
-`scarfinder_step!(ψ, U, χ; …)` is exactly this pair, and
+`scarfinder_step!(ψ, U, χ; …)` runs these two stages, and
 `scarfinder!(ψ, U, χ, N; …)` runs `N` of them. `U` is anything
 [`evolve!`](@ref) accepts:
 
@@ -24,15 +24,22 @@ keeps its `χ` largest Schmidt values of the canonical form) followed, when
 `target` is given, by [`energy_fix!`](@ref) (normalized imaginary-time steps
 toward `target`). It returns `(loss, energy_error, converged)`:
 
-- `loss = −log F_site` between the evolved and the truncated state, before the
-  energy correction;
+- `loss = −log F_site` between the evolved and truncated states, accounting for
+  their norms and measured before energy correction;
 - `energy_error = E(ψ) − target` after the correction (`nothing` without
   `target`);
 - `converged`: whether the correction met `tol` (`true` without `target`).
 
-`scarfinder_step!` returns the same tuple. All inputs are validated before `ψ`
-changes. Another manifold can take part by defining its own `project!` with
-these fields, and an `evolve!` method for its evolution type.
+`scarfinder_step!` uses the bond-dimension projection for dense iMPS and
+checks the projection arguments before evolution. For a nonempty built-in MPO
+evolution it can reuse the normalized Schmidt basis when the cut is well
+separated and the transfer has an isolated dominant fixed point. After
+slicing, the gauge is restored on the retained support.
+This can change the tensor gauge and roundoff compared with separate calls
+to `evolve!` and `project!`. Gate sequences are checked
+as each gate is applied, so a later error can leave earlier updates in place.
+For a different variational manifold, compose your evolution and projection
+in an explicit loop.
 
 ## The energy
 
@@ -77,8 +84,8 @@ with `constraint_leakage(ψ, Blockade())`.
   correction, see [`energy_fix!`](@ref).
 - `refine=true`, `refine_step=100`, `refine_U=U` (`refine_dt=dt/10` in the
   `(h, dt)` form): after the `N` iterations, scan `refine_step` further steps
-  with `refine_U` and keep the state of lowest maximal bond entropy. Use
-  `refine=false` whenever you select your own representative.
+  with `refine_U` and keep the state of lowest maximal bond entropy. Set
+  `refine=false` to run exactly `N` iterations.
 - `history`: a vector that collects the `N` results.
 - `observe`: a function `f(ψ, k, r)`, called with `k = 0` and `r = nothing` on
   the initial state and after each iteration with the candidate and its

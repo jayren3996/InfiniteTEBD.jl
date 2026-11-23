@@ -109,12 +109,11 @@ end
     @test norm(acc - I) < 1e-8
 end
 
-@testset "_evolve_uniform! takes the slow path on non-uniform bond dims" begin
+@testset "uniform gate sweep accepts non-uniform bond dimensions" begin
     psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
     applygate!(psi, exp(-0.3im .* Matrix(kron(_RF_X, _RF_X))), 1, 2; maxdim=4)
-    @test length(psi.λ[1]) != length(psi.λ[2])  # the crashing precondition
-    # previously threw DimensionMismatch from isapprox on unequal lengths
-    InfiniteTEBD._evolve_uniform!(psi, exp(-0.1im .* _RF_X); span=1)
+    @test length(psi.λ[1]) != length(psi.λ[2])
+    evolve!(psi, InfiniteTEBD._evolution(psi, exp(-0.1im .* _RF_X)), 1)
     @test abs(inner_product(psi) - 1) < 1e-6
 end
 

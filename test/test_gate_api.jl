@@ -10,6 +10,28 @@ if !isdefined(Main, :TestUtils)
 end
 using .TestUtils: bell_gate, pauli_matrices, right_canonical_error
 
+@testset "Dense gates preserve different local dimensions" begin
+    function product_state(dims)
+        tensors = [reshape([1.0; zeros(d - 1)], 1, d, 1) for d in dims]
+        return iMPS(tensors, [[1.0] for _ in dims], length(dims))
+    end
+    for dims in ((2, 8), (2, 3))
+        ψ = product_state(dims)
+        dim = prod(dims)
+        applygate!(ψ, Matrix{Float64}(I, dim, dim), 1, 2)
+        @test Tuple(size.(ψ.Γ, 2)) == dims
+        @test per_site_fidelity(ψ, product_state(dims)) ≈ 1
+    end
+
+    ψ = product_state((2, 3, 4))
+    # Across the seam, the support has dimensions (4, 2, 3).
+    G = kron(Matrix{Float64}(I, 4, 4), [0.0 1.0; 1.0 0.0], Matrix{Float64}(I, 3, 3))
+    _, stats = applygate!(ψ, G, 3, 2; return_stats=true)
+    @test size.(ψ.Γ, 2) == [2, 3, 4]
+    @test expect(ψ, Diagonal([0.0, 1.0]), 1, 1) ≈ 1
+    @test getfield.(stats.bond_stats, :bond) == [3, 1]
+end
+
 @testset "STRUCTURED PRODUCT AND CONTROLLED GATES" begin
     X = ComplexF64[0 1; 1 0]
     Y = ComplexF64[0 -im; im 0]

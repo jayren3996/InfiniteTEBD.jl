@@ -71,7 +71,7 @@ end
             push!(T, reshape(transpose(Matrix(Q)[:, 1:χ]), χ, d, χ))
         end
         matfree = InfiniteTEBD.inner_product(T)
-        dense = InfiniteTEBD._dominant_eigenvalue_dense(InfiniteTEBD.gtrm(T, T))
+        dense = abs(InfiniteTEBD._dominant_eigenvalue_dense(InfiniteTEBD.gtrm(T, T)))
         @test matfree ≈ dense rtol=1e-8
     end
 end
@@ -90,7 +90,7 @@ end
             push!(T, reshape(transpose(Matrix(Q)[:, 1:χ]), χ, d, χ))
         end
         matfree = InfiniteTEBD.inner_product(T)
-        dense = InfiniteTEBD._dominant_eigenvalue_dense(InfiniteTEBD.gtrm(T, T))
+        dense = abs(InfiniteTEBD._dominant_eigenvalue_dense(InfiniteTEBD.gtrm(T, T)))
         @test matfree ≈ dense rtol=1e-8
     end
 end

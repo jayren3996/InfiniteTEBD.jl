@@ -132,3 +132,49 @@ end
         @test ψ.Γ == saved.Γ && ψ.λ == saved.λ
     end
 end
+
+@testset "annihilating Schmidt slice leaves the input intact" begin
+    B = zeros(ComplexF64, 3, 5, 3)
+    transitions = ((1, 2, 0.5), (1, 3, 0.5), (2, 1, 0.9), (2, 2, 0.1), (3, 1, 1.0))
+    for (s, (a, b, p)) in enumerate(transitions)
+        B[a, s, b] = sqrt(p)
+    end
+    # B is right-isometric with Schmidt weights (18, 10, 9)/37. The leading
+    # direction has no self-transition, so keeping it alone gives zero.
+    ψ = iMPS([B], [sqrt.([18, 10, 9] ./ 37)], 1)
+    saved = deepcopy(ψ)
+    @test_throws MPOAnnihilationError InfiniteTEBD.truncate!(ψ, 1; cutoff=0)
+    @test ψ.Γ == saved.Γ && ψ.λ == saved.λ
+    @test_throws MPOAnnihilationError project!(ψ, 1; cutoff=0)
+    @test ψ.Γ == saved.Γ && ψ.λ == saved.λ
+end
+
+@testset "projection loss is independent of input scale" begin
+    ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
+    θ = 0.2
+    applygate!(ψ, exp(-im * θ * kron(RBPXP.X, RBPXP.X)), 1, 2; maxdim=2)
+    expected_loss = -log(cos(θ)) / 2
+    for scale in (1, 0.25, 4, 0.25im)
+        scaled = deepcopy(ψ)
+        scaled.Γ[1] .*= scale
+        @test project!(scaled, 1).loss ≈ expected_loss atol=1e-13
+        @test length.(scaled.λ) == [1, 1]
+    end
+    # The mixed overlap per cell would underflow before taking its n-th root.
+    long = product_iMPS(ComplexF64, fill([1, 0], 100))
+    foreach(A -> A .*= 1e-4, long.Γ)
+    @test project!(long, 1).loss ≈ 0 atol=1e-12
+end
+
+@testset "ScarFinder rechecks terms changed by an observer" begin
+    ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
+    terms = [(RBPXP.I2, 1, 1)]
+    history = NamedTuple[]
+    function observe(_state, k, _result)
+        k == 1 && (terms[1] = (2 * RBPXP.I2, 1, 1))
+        return nothing
+    end
+    scarfinder!(ψ, [(RBPXP.I2, 1, 1)], 1, 2; terms, target=0.0, maxstep=0,
+                nstep=2, refine=false, observe, history)
+    @test [r.energy_error for r in history] ≈ [0.5, 1.0]
+end

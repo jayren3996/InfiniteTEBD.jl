@@ -185,7 +185,7 @@ function inner_product(
     T2::AbstractArray{<:Number, 3};
     kwargs...
 )
-    _dominant_chain_eigenvalue([T1], [T2]; kwargs...)
+    inner_product([T1], [T2]; kwargs...)
 end
 #---------------------------------------------------------------------------------------------------
 function inner_product(Ts::AbstractVector{<:AbstractArray{<:Number, 3}}; kwargs...)
@@ -196,7 +196,7 @@ function inner_product(
     T2s::AbstractVector{<:AbstractArray{<:Number, 3}};
     kwargs...
 )
-    _dominant_chain_eigenvalue(T1s, T2s; kwargs...)
+    abs(_dominant_chain_eigenvalue(T1s, T2s; kwargs...))
 end
 
 # `_krylov_opts` lives in src/Krylov.jl (loaded earlier in the include chain).
@@ -206,11 +206,14 @@ end
 # exceeds the cost of a full χ²×χ² eigendecomposition; above that, the
 # matrix-free path is asymptotically better by O(χ³).
 const _CHAIN_EIG_DENSE_THRESHOLD = 8
+const _DENSE_TRANSFER_LIMIT = 4096
 
+# Retain the phase for callers that must restore the scale of a tensor network.
 function _dominant_chain_eigenvalue(
     T1s::AbstractVector{<:AbstractArray{<:Number, 3}},
     T2s::AbstractVector{<:AbstractArray{<:Number, 3}};
     dense_threshold::Integer=_CHAIN_EIG_DENSE_THRESHOLD,
+    dense_size::Integer=0,
     tol::Union{Nothing,Real}=nothing,
     maxiter::Union{Nothing,Integer}=nothing,
 )
@@ -229,8 +232,11 @@ function _dominant_chain_eigenvalue(
         "T2 has left=$χL_T2 right=$χR_T2"
     ))
 
-    if max(χL_T1, χL_T2) <= dense_threshold
-        return _dominant_eigenvalue_dense(gtrm(T1s, T2s); tol, maxiter)
+    # The dense path builds interior transfer matrices as well as the seam.
+    dense_allowed() = all(size(A, 1) * size(B, 1) <= _DENSE_TRANSFER_LIMIT
+                          for (A, B) in zip(T1s, T2s))
+    if (max(χL_T1, χL_T2) <= dense_threshold || χL_T1 * χL_T2 <= dense_size) && dense_allowed()
+        return _dominant_eigenvalue_dense(gtrm(T1s, T2s))
     end
 
     T = promote_type(eltype(T1s[1]), eltype(T2s[1]))
@@ -254,13 +260,15 @@ function _dominant_chain_eigenvalue(
     opts = _krylov_opts(; tol, maxiter)
     vals, _, info = eigsolve(f, vec(seed), 1, :LM; ishermitian=false, opts...)
     if info.converged < 1
-        # Random unstructured transfers occasionally fail to converge with the
-        # default Krylov budget; fall back to the dense path for correctness.
+        if !dense_allowed()
+            @warn "Dominant chain eigenvalue Krylov solver did not converge; returning NaN" info
+            return NaN
+        end
         @warn "Dominant chain eigenvalue Krylov solver did not converge; " *
               "falling back to dense path" info
-        return _dominant_eigenvalue_dense(gtrm(T1s, T2s); tol, maxiter)
+        return _dominant_eigenvalue_dense(gtrm(T1s, T2s))
     end
-    return abs(vals[1])
+    return vals[1]
 end
 
 # Deterministic quasi-random entries (no RNG state), same magnitude as the identity part.
@@ -278,25 +286,7 @@ function _add_unstructured_seed!(seed::AbstractMatrix{T}) where {T}
     return seed
 end
 
-function _dominant_eigenvalue_dense(
-    trmat::AbstractMatrix;
-    tol::Union{Nothing,Real}=nothing,
-    maxiter::Union{Nothing,Integer}=nothing,
-)
-    if size(trmat, 1) <= 4096
-        vals, _ = eigen(trmat)
-        idx = argmax(abs.(vals))
-        return abs(vals[idx])
-    end
-    opts = _krylov_opts(; tol, maxiter)
-    vals, _, info = eigsolve(trmat, 1, :LM; ishermitian=false, opts...)
-    if info.converged < 1
-        # Previously this warned and returned abs(vals[1]) anyway, masking the
-        # divergence. Callers downstream (norm, overlap, fixed-point checks)
-        # would silently propagate the wrong value. Returning NaN forces the
-        # caller to notice; the warning still fires so the cause is visible.
-        @warn "Dominant eigenvalue Krylov solver did not converge; returning NaN" info
-        return NaN
-    end
-    return abs(vals[1])
+function _dominant_eigenvalue_dense(trmat::AbstractMatrix)
+    vals, _ = eigen(trmat)
+    return vals[argmax(abs.(vals))]
 end

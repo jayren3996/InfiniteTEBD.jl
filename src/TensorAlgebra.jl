@@ -659,7 +659,21 @@ Notes:
 function tensor_decomp!(
     Γ::AbstractArray{<:Number, 3},
     λl::AbstractVector{<:Real},
-    n::Integer;
+    n::Integer; kwargs...
+)
+    n > 0 || throw(ArgumentError("tensor_decomp! requires n > 0 (got $n)"))
+    d = round(Int, size(Γ, 2)^(1/n))
+    d^n == size(Γ, 2) || throw(ArgumentError(
+        "inferred physical dimension d=$d does not satisfy d^$n == $(size(Γ, 2)); " *
+        "grouped tensor has malformed physical leg size"
+    ))
+    return _tensor_decomp!(Γ, λl, fill(d, n); kwargs...)
+end
+
+function _tensor_decomp!(
+    Γ::AbstractArray{<:Number, 3},
+    λl::AbstractVector{<:Real},
+    dims::AbstractVector{<:Integer};
     maxdim::Integer=MAXDIM,
     mindim::Integer=1,
     truncerr::Union{Nothing,Real}=nothing,
@@ -670,13 +684,8 @@ function tensor_decomp!(
     atol::Real=ZEROTOL,
     rtol::Real=eps(Float64),
 )
-    n > 0 || throw(ArgumentError("tensor_decomp! requires n > 0 (got $n)"))
+    n = length(dims)
     β = size(Γ, 3)
-    d = round(Int, size(Γ, 2)^(1/n))
-    d^n == size(Γ, 2) || throw(ArgumentError(
-        "inferred physical dimension d=$d does not satisfy d^$n == $(size(Γ, 2)); " *
-        "grouped tensor has malformed physical leg size"
-    ))
     if n == 1
         # Single-site unit cell: no internal bonds to decompose. Return Γ as
         # the only site tensor with an empty λ vector (n - 1 = 0 bonds).
@@ -688,61 +697,13 @@ function tensor_decomp!(
     λs = Vector{Vector{eltype(λl)}}(undef, n-1)
     bond_stats = return_stats ? BondStat[] : nothing
     Ti, λi = Γ, λl
-    for i=1:n-2
-        Ti_reshaped = reshape(Ti, size(Ti,1), d, :, β)
-        if return_stats
-            Ai, Λ, Ti, stats = tensor_svd(
-                Ti_reshaped;
-                maxdim,
-                mindim,
-                truncerr,
-                svd_min,
-                renormalize,
-                return_stats=true,
-            )
-            if !isnothing(stats)
-                bond = isnothing(bond_indices) ? i : bond_indices[i]
-                push!(bond_stats, BondStat(
-                    bond,
-                    stats.chi_req,
-                    stats.chi_keep,
-                    stats.discarded_weight,
-                    stats.saturated,
-                    stats.target_met,
-                    stats.smallest_kept_sv,
-                    stats.largest_discarded_sv,
-                ))
-            end
-        else
-            Ai, Λ, Ti = tensor_svd(
-                Ti_reshaped;
-                maxdim,
-                mindim,
-                truncerr,
-                svd_min,
-                renormalize,
-            )
-        end
-        tensor_lmul!(_safe_reciprocal(λi; atol, rtol), Ai)
-        tensor_rmul!(Ai, Λ)
-        tensor_lmul!(Λ, Ti)
-        Γs[i] = Ai
-        λs[i] = Λ
-        λi = Λ
-    end
-    Ti_reshaped = reshape(Ti, size(Ti,1), d, :, β)
-    if return_stats
-        Ai, Λ, Ti, stats = tensor_svd(
-            Ti_reshaped;
-            maxdim,
-            mindim,
-            truncerr,
-            svd_min,
-            renormalize,
-            return_stats=true,
-        )
-        if !isnothing(stats)
-            bond = isnothing(bond_indices) ? n - 1 : bond_indices[n - 1]
+    for i in 1:n-1
+        split = tensor_svd(reshape(Ti, size(Ti, 1), dims[i], :, β);
+                           maxdim, mindim, truncerr, svd_min, renormalize, return_stats)
+        Ai, Λ, Ti = split
+        if return_stats && !isnothing(split[4])
+            stats = split[4]
+            bond = isnothing(bond_indices) ? i : bond_indices[i]
             push!(bond_stats, BondStat(
                 bond,
                 stats.chi_req,
@@ -754,20 +715,15 @@ function tensor_decomp!(
                 stats.largest_discarded_sv,
             ))
         end
-    else
-        Ai, Λ, Ti = tensor_svd(
-            Ti_reshaped;
-            maxdim,
-            mindim,
-            truncerr,
-            svd_min,
-            renormalize,
-        )
+        tensor_lmul!(_safe_reciprocal(λi; atol, rtol), Ai)
+        tensor_rmul!(Ai, Λ)
+        # The next cut needs the weighted right block. The final stored site
+        # is already in the required convention and keeps the unweighted block.
+        i < n - 1 && tensor_lmul!(Λ, Ti)
+        Γs[i] = Ai
+        λs[i] = Λ
+        λi = Λ
     end
-    tensor_lmul!(_safe_reciprocal(λi; atol, rtol), Ai)
-    tensor_rmul!(Ai, Λ)
-    Γs[n-1] = Ai
-    λs[n-1] = Λ
     Γs[n] = Ti
     return_stats ? (Γs, λs, bond_stats) : (Γs, λs)
 end
@@ -1055,6 +1011,13 @@ function _chain_transfer_action(T1s, T2s; dir)
     workspace = ChainTransferWorkspace(T1s, T2s)
     # Krylov retains its iterates, so every call must return an owning array.
     return ρ -> copy(apply_chain_transfer!(workspace, T1s, T2s, ρ; dir))
+end
+
+# In the center equation the carry is ordered as T1 × T2, while the library's
+# left transfer uses T2 × T1. Transpose both sides to compute ∑ T1† X T2.
+function _left_chain_transfer_action(T1s, T2s)
+    transfer = _chain_transfer_action(T1s, T2s; dir=:l)
+    return X -> Matrix(transpose(transfer(transpose(X))))
 end
 
 #---------------------------------------------------------------------------------------------------

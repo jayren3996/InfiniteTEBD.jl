@@ -625,6 +625,14 @@ function _expect_internal(ψ::iMPS, O, inds)
     return real(ocontract(ψ.Γ[inds], O, λl))
 end
 
+function _mean_local_expectation(ψ, observables)
+    value = 0.0
+    for (O, inds) in observables
+        value += _expect_internal(ψ, O, inds)
+    end
+    return value / ψ.n
+end
+
 
 #---------------------------------------------------------------------------------------------------
 # MANIPULATION

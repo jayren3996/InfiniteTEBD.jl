@@ -326,7 +326,8 @@ function schmidt_canonical(
         return [A], [λ]
     end
     tensor_lmul!(λ, A)
-    Γs, λs = tensor_decomp!(A, λ, n; maxdim, svd_min=cutoff, renormalize)
+    Γs, λs = _tensor_decomp!(A, λ, [size(Γ, 2) for Γ in Γs];
+                             maxdim, svd_min=cutoff, renormalize)
     Γs, push!(λs, λ)
 end
 
@@ -620,10 +621,7 @@ function _periodic_left_centers(B, seed, tol, maxiter, accelerate)
         elseif accelerate && sweep < maxiter && sweep % 8 == 0
             AL = similar(B)
             _left_qr_sweep(B, previous, centers, AL)
-            # The library's :l map is a transpose. This converts it to
-            # Σ AL† C B for the left center equation.
-            transfer = _chain_transfer_action(AL, B; dir=:l)
-            action = C -> Matrix(transpose(transfer(transpose(C))))
+            action = _left_chain_transfer_action(AL, B)
             proposed = _mixed_qr_seed(action, carry, tol, :left)
             check = _left_qr_sweep(B, proposed, centers)
             norm((check - proposed) / UpperTriangular(proposed)) < residual && (carry = proposed)

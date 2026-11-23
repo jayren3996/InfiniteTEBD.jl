@@ -109,9 +109,9 @@ end
     ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
     G = Matrix{ComplexF64}(I, 2, 2)
 
-    @test_throws ArgumentError InfiniteTEBD._evolve_uniform!(ψ, G; span=0)
-    @test_throws ArgumentError InfiniteTEBD._evolve_uniform!(ψ, Matrix{ComplexF64}(I, 8, 8); span=3)
-    @test InfiniteTEBD._evolve_uniform!(ψ, G; span=1, maxdim=1) === ψ
+    @test_throws ArgumentError InfiniteTEBD._evolution(ψ, ones(1, 1))
+    @test_throws ArgumentError InfiniteTEBD._evolution(ψ, Matrix{ComplexF64}(I, 8, 8))
+    @test evolve!(ψ, InfiniteTEBD._evolution(ψ, G), 1; maxdim=1) === ψ
 end
 
 @testset "SCARFINDER_UNIFORM_EVOLVE_SPAN2_MATCHES_EXPLICIT_SWEEP" begin
@@ -121,7 +121,7 @@ end
     ψ_uniform = deepcopy(ψ)
     ψ_explicit = deepcopy(ψ)
 
-    InfiniteTEBD._evolve_uniform!(ψ_uniform, G; span=2, maxdim=4)
+    evolve!(ψ_uniform, InfiniteTEBD._evolution(ψ_uniform, G), 1; maxdim=4)
     applygate!(ψ_explicit, G, 1, 2; maxdim=4)
     applygate!(ψ_explicit, G, 2, 1; maxdim=4)
 

@@ -6,6 +6,18 @@ Layer MPOs and ScarFinder building blocks.
 
 ### Changed
 
+- ScarFinder can reuse the normalized Schmidt basis left by built-in MPO
+  evolution for a well-separated projection with an isolated transfer fixed
+  point, then restore the gauge on the
+  retained support. Tensor entries can differ from an explicit
+  `evolve!`–`project!` loop.
+- MPO compression and iMPS overlaps share the mixed-transfer eigensolver.
+  Compression retains the complex scale even when the virtual support is
+  orthogonal to the former all-ones Krylov seed.
+- Dense local gates preserve the physical dimension of each site in cells
+  with different local dimensions.
+- Energy correction prepares local observables once per solve and reuses
+  them across imaginary-time trials.
 - `ITensors` and `ITensorMPS` are weak dependencies. `InfiniteTEBD.imps2mps`
   is available after `using ITensorMPS`; `using InfiniteTEBD` alone loads in
   about 1 s instead of 4 s.
@@ -85,9 +97,10 @@ Layer MPOs and ScarFinder building blocks.
   the stored Schmidt spectra.
 - The controlled-layer fast path follows the stored MPO tensors, including
   construction cutoff, and falls back after an in-place tensor edit.
-- The MPO driver uses the MPO step, rejects a positional matrix density
-  and validates Hamiltonian term sizes before mutating the state.
+- ScarFinder validates Hamiltonian term sizes before evolution.
   `CanonicalFormError` identifies non-converged canonicalization.
+- `truncate!` leaves the input intact if restoring the canonical form fails.
+  `project!` accounts for the input norm when measuring projection loss.
 
 ### Changed
 

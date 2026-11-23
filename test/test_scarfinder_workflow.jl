@@ -2,6 +2,10 @@ using Test
 using LinearAlgebra
 using Random
 using InfiniteTEBD
+if !isdefined(Main, :TestUtils)
+    include(joinpath(@__DIR__, "test_utils.jl"))
+end
+using .TestUtils: right_canonical_error
 
 # Layer-MPO ScarFinder, observation, reproducible seeds, and translation.
 module SFW
@@ -43,12 +47,11 @@ using .SFW: SFW
     @test ψ.Γ == ψ0.Γ && ψ.λ == ψ0.λ
 end
 
-@testset "MPO ScarFinder matches the explicit PXP loop bit for bit" begin
+@testset "MPO ScarFinder matches the physical output of the explicit PXP loop" begin
     ψ = SFW.gauss_seq(3)
     explicit = deepcopy(ψ)
     e = 0.25
     energy_trials = 0
-    same_bits(a, b) = reinterpret(UInt8, vec(a)) == reinterpret(UInt8, vec(b))
     for nstep in (20, 2, 2)
         r = scarfinder_step!(ψ, SFW.U, 2; nstep, maxdim=16, cutoff=1e-12,
                              terms=SFW.LAYERS, target=e, n=2)
@@ -61,11 +64,73 @@ end
 
         energy_trials += correction.steps
         @test keys(correction) == (:converged, :residual, :steps)
-        @test r === (loss=loss, energy_error=correction.residual, converged=correction.converged)
-        @test all(same_bits.(ψ.Γ, explicit.Γ))
-        @test all(same_bits.(ψ.λ, explicit.λ))
+        @test r.converged == correction.converged
+        @test r.loss ≈ loss atol=1e-10
+        @test r.energy_error ≈ correction.residual atol=1e-10
+        @test length.(ψ.λ) == length.(explicit.λ)
+        @test per_site_fidelity(ψ, explicit) ≈ 1 atol=1e-12
+        @test right_canonical_error(ψ) < 1e-10
+        for i in 1:ψ.n
+            @test ψ.λ[i] ≈ explicit.λ[i] atol=1e-10
+            @test SFW.occ(ψ, i) ≈ SFW.occ(explicit, i) atol=1e-10
+        end
     end
     @test energy_trials > 0
+end
+
+@testset "MPO projection reuses only a well-separated normalized basis" begin
+    id1 = iMPO([reshape(SFW.I2, 1, 2, 2, 1)])
+    input = SFW.gauss_seq(3)
+    evolved = evolve!(deepcopy(input), SFW.U, 10; maxdim=16)
+    @test InfiniteTEBD._well_separated_schmidt_cut(evolved, 2, SVDTOL)
+    @test InfiniteTEBD._isolated_transfer_fixed_point(evolved)
+    InfiniteTEBD._truncate_canonical!(evolved; maxdim=2, cutoff=SVDTOL,
+                                     truncerr=0.0, renormalize=true)
+    scarfinder_step!(input, SFW.U, 2; nstep=10, maxdim=16)
+    @test input.Γ == evolved.Γ && input.λ == evolved.λ
+
+    ψ = product_iMPS(ComplexF64, [[1, 0]])
+    evolved = evolve!(deepcopy(ψ), [id1], 2)
+    @test scarfinder_step!(ψ, [id1], 1; nstep=2).loss === 0.0
+    @test ψ.Γ == evolved.Γ && ψ.λ == evolved.λ
+
+    # A rank-one cut in a degenerate GHZ Schmidt space keeps the explicit
+    # projection's choice of basis.
+    A = zeros(ComplexF64, 2, 2, 2)
+    A[1, 1, 1] = A[2, 2, 2] = 1
+    ψ = iMPS([A], [fill(inv(sqrt(2.0)), 2)], 1)
+    evolved = evolve!(deepcopy(ψ), [id1], 2)
+    @test !InfiniteTEBD._well_separated_schmidt_cut(evolved, 1, SVDTOL)
+    expected = project!(evolved, 1)
+    @test scarfinder_step!(ψ, [id1], 1; nstep=2) === expected
+    @test ψ.Γ == evolved.Γ && ψ.λ == evolved.λ
+
+    # Two sectors of different virtual dimensions keep different weights
+    # in the controlled sweep and in a fresh canonicalization.
+    center = zeros(ComplexF64, 3, 2, 3)
+    center[1, 1, 1] = 1
+    center[2:3, 1, 2:3] = Diagonal(sqrt.([0.99, 0.60]))
+    center[2:3, 2, 2:3] = [0 sqrt(0.01); sqrt(0.40) 0]
+    control = zeros(ComplexF64, 3, 2, 3)
+    control[1, 1, 1] = control[2, 2, 2] = control[3, 2, 3] = 1
+    weights = sqrt.([0.95, 0.05 * 0.40 / 0.41, 0.05 * 0.01 / 0.41])
+    ψ = iMPS([center, control], [copy(weights), copy(weights)], 2)
+    identity_layer = [layer_mpo([(Matrix{ComplexF64}(I, 8, 8), 2, 4)], 2)]
+    evolved, stats = evolve!(deepcopy(ψ), identity_layer, 2; return_stats=true)
+    @test stats.num_structured == 2
+    @test InfiniteTEBD._well_separated_schmidt_cut(evolved, 1, SVDTOL)
+    @test !InfiniteTEBD._isolated_transfer_fixed_point(evolved)
+    expected = project!(evolved, 1)
+    @test SFW.occ(evolved, 2) ≈ 1 atol=1e-12
+    @test scarfinder_step!(ψ, identity_layer, 1; nstep=2) === expected
+    @test ψ.Γ == evolved.Γ && ψ.λ == evolved.λ
+
+    ψ = product_iMPS(ComplexF64, [[1, 0]])
+    ψ.Γ[1] .*= 0.25
+    expected = deepcopy(ψ)
+    expected_result = project!(expected, 1)
+    @test scarfinder_step!(ψ, typeof(id1)[], 1; nstep=2) === expected_result
+    @test ψ.Γ == expected.Γ && ψ.λ == expected.λ
 end
 
 @testset "observing evolve! leaves the trajectory unchanged" begin

@@ -146,7 +146,7 @@ end
 end
 
 # =============================================================================
-# Fix 4: _evolve_uniform! should handle translationally invariant states
+# Fix 4: uniform gate sweeps should handle translationally invariant states
 # =============================================================================
 
 @testset "EVOLVE_UNIFORM_TRANSLATIONALLY_INVARIANT" begin
@@ -155,7 +155,7 @@ end
     ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0]])
     G = exp(-0.1 * P.Z)
     ψ_copy = deepcopy(ψ)
-    InfiniteTEBD._evolve_uniform!(ψ_copy, G; span=1, maxdim=4)
+    evolve!(ψ_copy, InfiniteTEBD._evolution(ψ_copy, G), 1; maxdim=4)
     @test ψ_copy.n == 2
     # For translationally invariant state, all sites should still be equivalent
     # (up to numerical noise)
@@ -163,7 +163,7 @@ end
 
     # Non-translationally invariant state should still work
     ψ2 = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
-    InfiniteTEBD._evolve_uniform!(ψ2, G; span=1, maxdim=4)
+    evolve!(ψ2, InfiniteTEBD._evolution(ψ2, G), 1; maxdim=4)
     @test ψ2.n == 2
 end
 

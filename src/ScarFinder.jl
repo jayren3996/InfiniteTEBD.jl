@@ -84,58 +84,6 @@ function uniform_layers(ψ::iMPS, h::AbstractMatrix; span::Integer=operator_span
 end
 
 """
-    _evolve_uniform!(ψ, G; span, maxdim=MAXDIM)
-
-Apply the same local gate `G` at every translation of a periodic unit cell.
-
-Parameters:
-- `ψ`
-  State updated in place.
-- `G`
-  Local gate to apply uniformly.
-
-Keyword arguments:
-- `span`
-  Number of sites acted on by `G`.
-- `maxdim=MAXDIM`
-  Maximum temporary bond dimension used by each local update.
-
-Returns:
-- The same object `ψ`, mutated in place.
-
-Notes:
-- This is an internal helper used by the ScarFinder routines.
-"""
-function _evolve_uniform!(ψ::iMPS, G::AbstractMatrix; span::Integer, maxdim::Integer=MAXDIM)
-    _validate_local_span(ψ, span)
-    offset = span - 1
-    # Optimization: for translationally invariant states, apply once and copy.
-    # This reduces O(n) gate applications to O(1) when all sites are identical.
-    # Note: truncation may break exact translational invariance, so this is
-    # guarded by an approximate equality check.
-    # isapprox on arrays of unequal size throws DimensionMismatch rather than
-    # returning false, and bond dimensions routinely differ across bonds after
-    # truncation — guard each comparison with a size check so non-uniform
-    # states take the generic path instead of crashing.
-    is_uniform = span == 1 &&
-                 ψ.n > 1 &&
-                 all(size(ψ.λ[1]) == size(ψ.λ[i]) && ψ.λ[1] ≈ ψ.λ[i] for i in 2:ψ.n) &&
-                 all(size(ψ.Γ[1]) == size(ψ.Γ[i]) && ψ.Γ[1] ≈ ψ.Γ[i] for i in 2:ψ.n)
-    if is_uniform
-        applygate!(ψ, G, 1, mod(1 + offset - 1, ψ.n) + 1; maxdim)
-        for i in 2:ψ.n
-            ψ.Γ[i] = copy(ψ.Γ[1])
-            ψ.λ[i] = copy(ψ.λ[1])
-        end
-    else
-        @inbounds for i in 1:ψ.n
-            applygate!(ψ, G, i, mod(i + offset - 1, ψ.n) + 1; maxdim)
-        end
-    end
-    return ψ
-end
-
-"""
     _warn_scarfinder_nstep(nstep)
 
 Throw for `nstep < 1` and warn once for `nstep == 1`, where one ScarFinder
@@ -176,20 +124,13 @@ function energy_density(ψ::iMPS, h::AbstractMatrix; span::Integer=operator_span
     _validate_local_span(ψ, span)
     d = size(ψ.Γ[1], 2)
     if all(A -> size(A, 2) == d, ψ.Γ)
-        return _energy_density_internal(ψ, convert_operator(h, d, span), span)
+        O = convert_operator(h, d, span)
+        observables = ((O, _gate_indices(ψ, i, mod1(i + span - 1, ψ.n))) for i in 1:ψ.n)
+        return _mean_local_expectation(ψ, observables)
     end
     E = 0.0
     for i in 1:ψ.n
         E += expect(ψ, h, i, mod1(i + span - 1, ψ.n))
-    end
-    return E / ψ.n
-end
-
-function _energy_density_internal(ψ, O, span)
-    E = 0.0
-    for i in 1:ψ.n
-        inds = _gate_indices(ψ, i, mod1(i + span - 1, ψ.n))
-        E += _expect_internal(ψ, O, inds)
     end
     return E / ψ.n
 end
@@ -237,17 +178,13 @@ function energy_span(
     ψmin = rand_iMPS(ComplexF64, n, d, 1)
     Gmin = exp(-dτ * h)
     span = operator_span(ψmin, h)
-    for _ in 1:Nτ
-        _evolve_uniform!(ψmin, Gmin; span, maxdim)
-    end
+    evolve!(ψmin, _evolution(ψmin, Gmin), Nτ; maxdim)
     canonical!(ψmin)
     Emin = energy_density(ψmin, h; span)
 
     ψmax = rand_iMPS(ComplexF64, n, d, 1)
     Gmax = exp(dτ * h)
-    for _ in 1:Nτ
-        _evolve_uniform!(ψmax, Gmax; span, maxdim)
-    end
+    evolve!(ψmax, _evolution(ψmax, Gmax), Nτ; maxdim)
     canonical!(ψmax)
     Emax = energy_density(ψmax, h; span)
 
@@ -318,13 +255,16 @@ end
 # ScarFinder: evolve off the manifold, project back onto it
 #---------------------------------------------------------------------------------------------------
 # One iteration is `evolve!(ψ, U, nstep)` followed by `project!`. `U` is anything `evolve!`
-# accepts (a gate sequence, a vector of layer MPOs, …); `project!` is defined per manifold.
+# accepts (a gate sequence, a vector of layer MPOs, …).
 
 _uniform_terms(ψ::iMPS, h::AbstractMatrix) = (s = operator_span(ψ, h); [(h, i, i + s - 1) for i in 1:ψ.n])
 
 # A single local gate is applied at every translation of the cell, left to right.
-_evolution(ψ::iMPS, G::AbstractMatrix) =
-    (s = operator_span(ψ, G); [(G, i, mod1(i + s - 1, ψ.n)) for i in 1:ψ.n])
+function _evolution(ψ::iMPS, G::AbstractMatrix)
+    span = operator_span(ψ, G)
+    _validate_local_span(ψ, span)
+    return [(G, i, mod1(i + span - 1, ψ.n)) for i in 1:ψ.n]
+end
 _evolution(ψ::iMPS, U) = U
 
 function _hamiltonian_evolution(ψ::iMPS, h::AbstractMatrix, dt::Real; trotter, layers)
@@ -350,10 +290,64 @@ function _projection_setup(ψ::iMPS, χ::Integer; cutoff, terms, target, tol, al
     return prep
 end
 
-function _project!(ψ::iMPS, χ::Integer, prep; cutoff, target, tol, alpha, maxstep)
-    before = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
-    truncate!(ψ, χ; cutoff)
-    loss = -log(min(per_site_fidelity(before, ψ), 1.0))
+function _well_separated_schmidt_cut(ψ::DenseIMPS, χ, cutoff)
+    floor = max(cutoff, _NULL_FLOOR)
+    for s in ψ.λ
+        k = min(χ, length(s))
+        margin = max(sqrt(eps(eltype(s))), _ORTH_FLOOR) * first(s)
+        # Reuse only when the retained values clear the numerical floor and
+        # the cut does not split a nearly degenerate Schmidt subspace.
+        s[k] > floor + margin || return false
+        k == length(s) || s[k] - s[k + 1] > margin || return false
+    end
+    return true
+end
+
+function _isolated_transfer_fixed_point(ψ::DenseIMPS)
+    weights = abs2.(last(ψ.λ))
+    dim = length(weights)
+    isone(dim) && return true
+    transfer = _chain_transfer_action(ψ.Γ, ψ.Γ; dir=:r)
+    function without_identity(X)
+        Y = transfer(X)
+        # In right canonical form I is fixed and the dual fixed point is
+        # diag(λ²). Remove this eigenvalue to expose any other slow sector.
+        offset = sum(weights[i] * X[i, i] for i in eachindex(weights))
+        for i in eachindex(weights)
+            Y[i, i] -= offset
+        end
+        return Y
+    end
+    seed = _add_unstructured_seed!(zeros(eltype(ψ), dim, dim))
+    tol = max(sqrt(eps(eltype(weights))), _ORTH_FLOOR)
+    values, _, info = try
+        eigsolve(without_identity, seed, 1, :LM; tol, krylovdim=min(24, length(seed)),
+                 maxiter=2, ishermitian=false, verbosity=0)
+    catch err
+        err isa Union{ArgumentError,LAPACKException,DomainError} || rethrow()
+        return false
+    end
+    return info.converged >= 1 && abs(first(values)) < 1 - sqrt(tol)
+end
+
+function _project!(ψ::DenseIMPS, χ::Integer, prep; cutoff, target, tol, alpha, maxstep,
+                   canonical_input::Bool=false)
+    reuse = canonical_input && _well_separated_schmidt_cut(ψ, χ, cutoff) &&
+            _isolated_transfer_fixed_point(ψ)
+    trial, _, lognorm, sliced = _truncated_state(ψ; maxdim=χ, cutoff, truncerr=0.0,
+                                                renormalize=true, canonical_input=reuse)
+    lognorm_site = lognorm / ψ.n
+    reference = if abs(lognorm_site) <= _ORTH_TOL
+        ψ
+    else
+        # Reuse the input norm from canonicalization, distributing the scale
+        # over the cell so the mixed transfer does not underflow on long cells.
+        norm_site = exp(lognorm_site)
+        iMPS([A ./ norm_site for A in ψ.Γ], ψ.λ, ψ.n)
+    end
+    loss = reuse && !sliced ? 0.0 : -log(min(per_site_fidelity(reference, trial), 1.0))
+    ψ.Γ .= trial.Γ
+    ψ.λ .= trial.λ
     isnothing(prep) && return (; loss, energy_error=nothing, converged=true)
     r = _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff)
     return (; loss, energy_error=r.residual, converged=r.converged)
@@ -366,14 +360,12 @@ Project `ψ` onto the manifold of bond dimension `χ` at energy density `target`
 [`truncate!`](@ref) every bond to `χ`, then, if `target` is given, correct the
 energy with [`energy_fix!`](@ref) using the terms `(h, i, j)` (period `n`).
 
-Returns `(loss, energy_error, converged)`. `loss = −log F_site` between the
-input and the truncated state, measured before energy correction.
+Returns `(loss, energy_error, converged)`. `loss = −log F_site` compares the
+input and truncated states after accounting for their norms, before energy correction.
 `energy_error` is `E(ψ) − target` after correction (`nothing` without
 `target`); `converged` tells whether it met `tol` (`true` without `target`).
 
-This is the projection step of [`scarfinder_step!`](@ref). Another variational
-manifold can take part in ScarFinder by defining its own `project!` (and an
-`evolve!` for its evolution type) with the same return fields.
+This is the bond-dimension projection used by [`scarfinder_step!`](@ref) for dense iMPS.
 """
 function project!(ψ::iMPS, χ::Integer; cutoff::Real=SVDTOL, terms=nothing,
                   target::Union{Nothing,Real}=nothing, tol::Real=1e-6, alpha::Real=0.1,
@@ -399,17 +391,34 @@ the terms `(h, i, i + span − 1)` for every site of the cell. The form
 or with `trotter_gates(layers, dt; trotter)`, and corrects the energy with `h`.
 
 The term period `n` defaults to the cell length of the first MPO, or `ψ.n`.
-All inputs are validated before `ψ` changes. `nstep = 1` warns: one iteration
-should contain several microscopic steps.
+Projection arguments are checked before evolution. Gate sequences are
+validated as each gate is applied, so a later error can leave earlier updates
+in place. `nstep = 1` warns because one iteration should contain several
+microscopic steps.
+
+After a nonempty built-in MPO evolution, the projection can reuse the
+normalized Schmidt basis when both the cut and the dominant transfer fixed
+point are well separated. A cut still
+restores the gauge on the retained support. The tensor gauge and roundoff
+can differ from separate calls to `evolve!` and `project!`.
 """
-function scarfinder_step!(ψ::iMPS, U, χ::Integer; nstep::Integer=10, maxdim::Integer=MAXDIM,
-                          cutoff::Real=SVDTOL, terms=nothing,
-                          target::Union{Nothing,Real}=nothing, tol::Real=1e-6, alpha::Real=0.1,
-                          maxstep::Integer=50, n::Integer=_term_period(ψ, U))
+scarfinder_step!(ψ::iMPS, U, χ::Integer; kwargs...) =
+    _prepare_scarfinder_step(ψ, U, χ; kwargs...)(ψ)
+
+function _prepare_scarfinder_step(ψ::iMPS, U, χ::Integer; nstep::Integer=10, maxdim::Integer=MAXDIM,
+                                  cutoff::Real=SVDTOL, terms=nothing,
+                                  target::Union{Nothing,Real}=nothing, tol::Real=1e-6, alpha::Real=0.1,
+                                  maxstep::Integer=50, n::Integer=_term_period(ψ, U))
     prep = _projection_setup(ψ, χ; cutoff, terms, target, tol, alpha, maxstep, n)
     _warn_scarfinder_nstep(nstep)
-    evolve!(ψ, _evolution(ψ, U), nstep; maxdim, cutoff)
-    return _project!(ψ, χ, prep; cutoff, target, tol, alpha, maxstep)
+    evolution = _evolution(ψ, U)
+    return function (state)
+        evolve!(state, evolution, nstep; maxdim, cutoff)
+        # A plain MPO vector takes the built-in path, which ends with a
+        # normalized canonical state if it applied at least one layer.
+        canonical_input = evolution isa Vector{<:iMPO} && !isempty(evolution)
+        return _project!(state, χ, prep; cutoff, target, tol, alpha, maxstep, canonical_input)
+    end
 end
 
 scarfinder_step!(ψ::iMPS, U, h::AbstractMatrix, χ::Integer; kwargs...) =
@@ -441,14 +450,21 @@ function scarfinder!(ψ::iMPS, U, χ::Integer, N::Integer; refine::Bool=true,
     N >= 0 || throw(ArgumentError("N must be nonnegative"))
     (!refine || refine_step >= 0) || throw(ArgumentError("refine_step must be nonnegative"))
     isnothing(observe) || observe(ψ, 0, nothing)
+    # An observer can update the Hamiltonian or gate list between iterations.
+    step! = if N > 0 && isnothing(observe)
+        _prepare_scarfinder_step(ψ, U, χ; kwargs...)
+    else
+        state -> scarfinder_step!(state, U, χ; kwargs...)
+    end
     for k in 1:N
-        r = scarfinder_step!(ψ, U, χ; kwargs...)
+        r = step!(ψ)
         isnothing(history) || push!(history, r)
         isnothing(observe) || observe(ψ, k, r)
     end
-    if refine
-        step! = state -> scarfinder_step!(state, refine_U, χ; kwargs...)
-        minimize_on_trajectory!(_refinement_objective, step!, ψ, refine_step)
+    if refine && refine_step > 0
+        refine_step! = N > 0 && isnothing(observe) && refine_U === U ? step! :
+                       _prepare_scarfinder_step(ψ, refine_U, χ; kwargs...)
+        minimize_on_trajectory!(_refinement_objective, refine_step!, ψ, refine_step)
     end
     return ψ
 end

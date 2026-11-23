@@ -100,10 +100,10 @@ end
         @test abs(per_site_fidelity(ψa, ψb) - 1) < 1e-12
     end
     # the scale is kept, not only the direction: compare the operators per site
-    z = InfiniteTEBD._mixed_cell_eigenvalue(
+    z = InfiniteTEBD._dominant_chain_eigenvalue(
         [reshape(A, size(A, 1), 4, size(A, 4)) for A in merged.W],
         [reshape(A, size(A, 1), 4, size(A, 4)) for A in full.W])
-    nf = InfiniteTEBD._mixed_cell_eigenvalue(
+    nf = InfiniteTEBD._dominant_chain_eigenvalue(
         [reshape(A, size(A, 1), 4, size(A, 4)) for A in full.W],
         [reshape(A, size(A, 1), 4, size(A, 4)) for A in full.W])
     @test z ≈ nf rtol=1e-12
@@ -117,6 +117,19 @@ end
     _, sb = evolve!(ψb, U, 3; maxdim=1000, cutoff=1e-14, merge=false, return_stats=true)
     @test length(sa.updates) == 7 && length(sb.updates) == 9
     @test abs(per_site_fidelity(ψa, ψb) - 1) < 1e-12
+end
+
+@testset "MPO compression preserves the complex scale" begin
+    # The virtual support is orthogonal to an all-ones Krylov seed. The raw
+    # mixed transfer has dimension 65 and takes the matrix-free path.
+    v = [1.0, -1.0, zeros(63)...]
+    op = im * _X
+    tensor = [v[l] * op[o, i] * v[r] / 2
+              for l in eachindex(v), o in 1:2, i in 1:2, r in eachindex(v)]
+    W = iMPO([tensor])
+    compressed = compress_mpo(W)
+    @test bonddims(compressed) == [1]
+    @test reshape(compressed[1], 2, 2) ≈ op atol=1e-13
 end
 
 @testset "preconditions error clearly" begin
