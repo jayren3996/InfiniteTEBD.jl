@@ -4,6 +4,12 @@
 
 Layer MPOs and ScarFinder building blocks.
 
+### Changed
+
+- `ITensors` and `ITensorMPS` are weak dependencies. `InfiniteTEBD.imps2mps`
+  is available after `using ITensorMPS`; `using InfiniteTEBD` alone loads in
+  about 1 s instead of 4 s.
+
 ### Added
 
 - `iMPO`: infinite MPO with tensors `(Dl, d_out, d_in, Dr)` and cell length
@@ -19,7 +25,8 @@ Layer MPOs and ScarFinder building blocks.
 - `trotter_mpos(layers, dt; trotter, evolution, n, gate_map)` and
   `evolve!(ψ, mpos::Vector{<:iMPO}, steps)`, which merges the half steps at
   step boundaries.
-- `truncate!(ψ, χ)`: bond-symmetric truncation (extends `ITensorMPS.truncate!`).
+- `truncate!(ψ, χ)`: bond-symmetric truncation. With `ITensorMPS` also loaded,
+  qualify it as `InfiniteTEBD.truncate!` (as for `expect`).
 - `energy_density(ψ, terms; n)` for site-dependent terms, `energy_fix!` with
   imaginary-time layer MPOs returning `(converged, residual, steps)`,
   `per_site_fidelity`, and `scarfinder_step!(ψ, mpos, χ; …)` returning

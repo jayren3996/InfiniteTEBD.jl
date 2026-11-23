@@ -1,8 +1,8 @@
 using Test
 using LinearAlgebra
 using Random
-using ITensors
-using ITensorMPS
+using ITensors: Index, inds
+import ITensorMPS   # qualified: it also exports truncate! and expect
 
 Random.seed!(20260525)
 

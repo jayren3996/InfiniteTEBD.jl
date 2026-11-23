@@ -4,10 +4,6 @@
 export iMPO, bonddims, layer_mpo, check_commuting, compress_mpo, mpo_multiply
 export apply!, trotter_mpos, truncate!, energy_fix!, constraint_leakage, MPOAnnihilationError
 
-# ITensorMPS (a dependency) already owns and exports a generic `truncate!`.
-# Extending it keeps `using InfiniteTEBD, ITensorMPS` free of a name clash.
-import ITensorMPS: truncate!
-
 """
     CanonicalFormError
 

@@ -288,11 +288,10 @@ If the ScarFinder routines are useful in your published work, please cite:
 
 ## 🙏 Acknowledgements
 
-InfiniteTEBD.jl builds on [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) /
-[`ITensorMPS.jl`](https://github.com/ITensor/ITensorMPS.jl) for tensor-network primitives,
-[`TensorOperations.jl`](https://github.com/Jutho/TensorOperations.jl) for contractions, and
+InfiniteTEBD.jl builds on [`TensorOperations.jl`](https://github.com/Jutho/TensorOperations.jl) for contractions and
 [`KrylovKit.jl`](https://github.com/Jutho/KrylovKit.jl) for the dominant transfer-matrix
-eigenvalue.
+eigenvalue. Loading [`ITensorMPS.jl`](https://github.com/ITensor/ITensorMPS.jl)
+enables `InfiniteTEBD.imps2mps`, which exports a finite window as an `MPS`.
 
 ## 📄 License
 

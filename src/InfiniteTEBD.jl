@@ -12,7 +12,6 @@ export MAXDIM, SVDTOL, DenseIMPS, expect, ent_S
 #---------------------------------------------------------------------------------------------------
 using LinearAlgebra, TensorOperations, KrylovKit
 using Random: AbstractRNG, default_rng
-using ITensors, ITensorMPS
 import Base: eltype, getindex, setindex!
 import LinearAlgebra: conj
 
