@@ -33,14 +33,14 @@ end
         manual = deepcopy(template)
         gates = trotter_gates(groups, dt; trotter=scheme)
         evolve!(manual, gates, 2; maxdim=8)
-        truncate_unitcell!(manual, χ)
+        truncate!(manual, χ)
         options = (; nstep=2, maxdim=8, trotter=scheme)
         if mode === :explicit
             options = (; options..., layers=groups)
         end
         step = deepcopy(template)
         run = deepcopy(template)
-        @test scarfinder_step!(step, h, dt, χ; options...) === step
+        @test scarfinder_step!(step, h, dt, χ; options...).converged
         @test scarfinder!(run, h, dt, χ, 1; refine=false, options...) === run
         @test abs(inner_product(manual, step)) ≈ 1.0 atol=1e-10
         @test abs(inner_product(manual, run)) ≈ 1.0 atol=1e-10
@@ -58,7 +58,7 @@ end
     # sampling backward using gates at refine_dt.
     ψ = deepcopy(template)
     evolve!(ψ, trotter_gates(layers, dt; trotter=:fourth), 2; maxdim=8)
-    truncate_unitcell!(ψ, χ)
+    truncate!(ψ, χ)
     refine_dt = -dt / 2
     trial = deepcopy(ψ)
     objective(state) = maximum(ent_S(state, i) for i in 1:state.n)
@@ -67,7 +67,7 @@ end
     refine_gates = trotter_gates(layers, refine_dt; trotter=:fourth)
     for _ in 1:3
         evolve!(trial, refine_gates, 2; maxdim=8)
-        truncate_unitcell!(trial, χ)
+        truncate!(trial, χ)
         best_entropy = min(best_entropy, objective(trial))
     end
     scarfinder!(ψ, h, dt, χ, 0; trotter=:fourth, refine_dt, refine_step=3, nstep=2, maxdim=8)
@@ -101,8 +101,8 @@ end
 end
 
 @testset "SCARFINDER_NSTEP_VALIDATION" begin
-    @test_throws ArgumentError InfiniteTEBD._warn_scarfinder_nstep(0, :gate)
-    @test InfiniteTEBD._warn_scarfinder_nstep(2, :gate) === nothing
+    @test_throws ArgumentError InfiniteTEBD._warn_scarfinder_nstep(0)
+    @test InfiniteTEBD._warn_scarfinder_nstep(2) === nothing
 end
 
 @testset "SCARFINDER_UNIFORM_EVOLVE_VALIDATION" begin
@@ -112,14 +112,6 @@ end
     @test_throws ArgumentError InfiniteTEBD._evolve_uniform!(ψ, G; span=0)
     @test_throws ArgumentError InfiniteTEBD._evolve_uniform!(ψ, Matrix{ComplexF64}(I, 8, 8); span=3)
     @test InfiniteTEBD._evolve_uniform!(ψ, G; span=1, maxdim=1) === ψ
-end
-
-@testset "SCARFINDER_TRUNCATE_ONE_SITE_UNITCELL" begin
-    ψ = product_iMPS(ComplexF64, [[1, 0]])
-
-    @test InfiniteTEBD._truncate_unitcell!(ψ, 1) === ψ
-    @test ψ.n == 1
-    @test length(ψ.λ[1]) == 1
 end
 
 @testset "SCARFINDER_UNIFORM_EVOLVE_SPAN2_MATCHES_EXPLICIT_SWEEP" begin
@@ -191,8 +183,8 @@ end
     gates = Any[(I3, 2, 2), (gate, 1, 3), (controlled, 1, 3)]
     manual = deepcopy(ψ)
     evolve!(manual, gates, 2; maxdim=6)
-    truncate_unitcell!(manual, 2; recanonicalize=true)
-    @test scarfinder_step!(ψ, gates, 2; nstep=2, maxdim=6) === ψ
+    truncate!(manual, 2)
+    @test scarfinder_step!(ψ, gates, 2; nstep=2, maxdim=6).converged
     @test size.(ψ.Γ, 2) == [2, 3, 2]
     @test inner_product(ψ, manual) ≈ 1.0 atol=1e-10
     @test_throws ArgumentError scarfinder_step!(ψ, gates, 2; nstep=2, target=0.0)
@@ -201,13 +193,24 @@ end
     ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0], [1, 0]])
     main = ((EndpointGate(exp(-0.2im * kron(X, X)), (2, 2)), 1, 3),)
     back = ((EndpointGate(exp(0.2im * kron(X, X)), (2, 2)), 1, 3),)
-    scarfinder!(ψ, main, 2, 1; nstep=2, maxdim=6, refine_gates=back, refine_step=1)
+    scarfinder!(ψ, main, 2, 1; nstep=2, maxdim=6, refine_U=back, refine_step=1)
     @test maximum(ent_S(ψ, i) for i in 1:ψ.n) < 1e-10
 
     # The correction Hamiltonian is independent of the prepared driving gates.
     ψ = product_iMPS(ComplexF64, [[1, 0], [1, 0], [1, 0]])
     gates = ((Z, 1, 1),)
     @test scarfinder!(ψ, gates, X, 1, 1; nstep=2, target=0.25,
-        α=0.8, refine=false) === ψ
+        alpha=0.8, refine=false) === ψ
     @test energy_density(ψ, X) ≈ 0.25 atol=1e-6
+end
+
+@testset "DEPRECATED_SCARFINDER_HELPERS" begin
+    h = ComplexF64[0 1; 1 0]
+    a = rand_iMPS(ComplexF64, 2, 2, 4)
+    b, c, d = deepcopy(a), deepcopy(a), deepcopy(a)
+    @test_deprecated truncate_unitcell!(a, 2)
+    truncate!(b, 2)
+    @test a.Γ == b.Γ && a.λ == b.λ
+    r = @test_deprecated fix_energy!(c, h, 2; target=0.1, α=0.3)
+    @test r == energy_fix!(d, [(h, 1, 1), (h, 2, 2)], 2; target=0.1, alpha=0.3)
 end

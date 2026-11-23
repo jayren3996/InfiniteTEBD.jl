@@ -94,9 +94,7 @@ original state if that check or the Gram numerical solve fails. A small
 seam is also checked for multiple peripheral transfer eigenvalues. The
 default is `method=:gram`.
 
-For compression at large `n`, [`truncate_unitcell!`](@ref) uses local SVDs to
-cap the bond dimensions. Pass `recanonicalize=true` to restore the global
-gauge of the compressed state with the same site-by-site transfer method.
+To compress every bond to `χ`, use [`truncate!`](@ref).
 
 !!! warning "Injective setting"
     This canonicalization path assumes a non-degenerate transfer spectrum. For

@@ -9,6 +9,21 @@ Layer MPOs and ScarFinder building blocks.
 - `ITensors` and `ITensorMPS` are weak dependencies. `InfiniteTEBD.imps2mps`
   is available after `using ITensorMPS`; `using InfiniteTEBD` alone loads in
   about 1 s instead of 4 s.
+- One ScarFinder driver for every evolution: an iteration is
+  `evolve!(ψ, U, nstep)` followed by the new `project!(ψ, χ; terms, target)`
+  (`truncate!`, then `energy_fix!`). `U` is a gate list, a vector of layer MPOs
+  or a single local gate; a matrix density `h` stands for uniform terms, also
+  with MPOs. Breaking changes on the gate and Hamiltonian forms:
+  - `scarfinder_step!` returns `(loss, energy_error, converged)` instead of `ψ`;
+  - the projection is `truncate!` (bond-symmetric canonical truncation), so
+    trajectories differ slightly from the sequential `truncate_unitcell!` split;
+  - the energy correction is `energy_fix!`; it needs a complex state, and its
+    step-size keyword is `alpha` (was `α`);
+  - `span` and `hspan` are inferred from the operators and no longer accepted;
+    `refine_gates` / `refine_mpos` are `refine_U`;
+  - `observe` and `history` work for every form.
+- `truncate_unitcell!` and `fix_energy!` are deprecated in favour of
+  `truncate!` and `energy_fix!`.
 
 ### Added
 

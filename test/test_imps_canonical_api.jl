@@ -386,8 +386,8 @@ end
     end
 
     ψ = deepcopy(original)
-    compressed = truncate_unitcell!(deepcopy(ψ), 2)
-    @test truncate_unitcell!(ψ, 2; recanonicalize=true) === ψ
+    compressed = truncate!(deepcopy(ψ), 2)
+    @test truncate!(ψ, 2) === ψ
     @test maximum(length.(ψ.λ)) <= 2
     @test right_canonical_error(ψ) < 1e-10
     @test abs(inner_product(compressed, ψ)) / sqrt(inner_product(compressed)) ≈ 1 atol=1e-10

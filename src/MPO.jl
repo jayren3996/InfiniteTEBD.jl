@@ -930,12 +930,6 @@ singled out, a state that is invariant under a translation of the cell stays
 invariant (up to roundoff) — tiling a two-site state onto four sites and
 truncating gives the tiled truncated two-site state.
 
-This differs from [`truncate_unitcell!`](@ref), which groups the cell into one
-tensor and splits it bond by bond from the left (or sweeps bond by bond on
-large cells). That sequential split singles out the bonds by their order, so
-on a cell that is a repeated smaller cell it can break the repetition and seed
-a spurious cell doubling. `truncate_unitcell!` remains available unchanged.
-
 Returns `ψ`, or `(ψ, stats)` with `return_stats=true`; `stats` has fields
 `bond_stats`, `max_discarded_weight`, `kept_dims` and `num_saturated`.
 
@@ -1519,8 +1513,7 @@ greedily into layers that satisfy the [`layer_mpo`](@ref) precondition. The
 terms are repeated with period `n`, and the energy is measured with
 `energy_density(ψ, terms; n)`.
 
-The step rule is that of [`fix_energy!`](@ref): start with
-`dτ = alpha · (E − target)`; each trial applies a second-order imaginary-time
+Start with `dτ = alpha · (E − target)`; each trial applies a second-order imaginary-time
 step `trotter_mpos(layers, dτ; evolution=:imaginary)` truncated to `χ`.
 A trial that reduces `|E − target|` is accepted and the next `dτ` is predicted
 from the measured slope (growth clamped to a factor 2). On rejection, the
@@ -1586,97 +1579,6 @@ function constraint_leakage(ψ::iMPS, P::iMPO)
     _annihilated(lognorm, ψ, P) && return Inf
     lognorm_in = log(inner_product(ψ)) / 2
     return max(-(lognorm - lognorm_in) / ψ.n, 0.0)
-end
-
-
-
-#---------------------------------------------------------------------------------------------------
-# ScarFinder with layer MPOs
-#---------------------------------------------------------------------------------------------------
-"""
-    scarfinder_step!(ψ, mpos, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n)
-
-Evolve `ψ` for `nstep` Trotter steps with a vector of layer MPOs, then
-[`truncate!`](@ref) every bond to `χ`. If `target` is given, correct the
-energy with the imaginary-time layers of [`energy_fix!`](@ref) built from
-`terms`. The term period `n` defaults to the first MPO's cell length, or
-to `ψ.n` for an empty vector.
-
-Returns `(loss, energy_error, converged)`. The loss is `−log F_site` between
-the evolved and truncated states, measured before energy correction.
-`energy_error` is `E(ψ) − target` after correction (`nothing` without
-`target`). `converged` indicates whether the correction met `tol` (`true`
-without `target`).
-"""
-function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integer;
-                          nstep::Integer=10, maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL,
-                          terms=nothing, target::Union{Nothing,Real}=nothing,
-                          tol::Real=1e-6, alpha::Real=0.1, maxstep::Integer=50,
-                          n::Integer=isempty(mpos) ? ψ.n : first(mpos).n)
-    _validate_mpo_truncation(χ, cutoff, 0.0)
-    n > 0 || throw(ArgumentError("unit-cell length must be positive"))
-    ψ.n % n == 0 || throw(ArgumentError("ψ.n = $(ψ.n) must be a multiple of the term period n = $n"))
-    !isnothing(target) && isnothing(terms) && throw(ArgumentError("supply `terms` when setting `target`"))
-    prep = isnothing(terms) ? nothing : _prepare_imaginary(terms; n, d=size(ψ.Γ[1], 2))
-    if !isnothing(target)
-        _validate_energy_fix_args(ψ, χ, prep; target, tol, alpha, maxstep, cutoff)
-    end
-
-    _warn_scarfinder_nstep(nstep, :gate)
-    evolve!(ψ, mpos, nstep; maxdim, cutoff)
-    before = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
-    truncate!(ψ, χ; cutoff)
-    loss = -log(min(per_site_fidelity(before, ψ), 1.0))
-    if isnothing(target)
-        return (loss=loss, energy_error=nothing, converged=true)
-    end
-    res = _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff)
-    return (loss=loss, energy_error=res.residual, converged=res.converged)
-end
-
-# A matrix density `h` belongs to the gate-list interface; MPO steps take `terms`.
-function scarfinder_step!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, h::AbstractMatrix, χ::Integer;
-                          kwargs...)
-    throw(ArgumentError("with MPOs, pass the Hamiltonian as `terms=[(h, i, j), …]`, " *
-                        "not as a matrix argument"))
-end
-
-"""
-    scarfinder!(ψ, mpos, χ, N; refine=true, refine_step=100, refine_mpos=mpos, history=nothing, observe=nothing, kwargs...)
-
-Run `N` MPO [`scarfinder_step!`](@ref) iterations. With `refine=true`,
-[`minimize_on_trajectory!`](@ref) can replace `ψ` with the minimum-entanglement
-state found over `refine_step` further steps using `refine_mpos`.
-
-`observe(ψ, k, r)` receives `k = 0` and `r = nothing` at the initial state,
-then each main iteration's candidate and result. Copy the live state to keep a
-snapshot. `history` collects the `N` results. Refinement contributes no samples
-to either. Returns `ψ`.
-"""
-function scarfinder!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, χ::Integer, N::Integer;
-                     refine::Bool=true, refine_step::Integer=100,
-                     refine_mpos::AbstractVector{<:iMPO}=mpos,
-                     history::Union{Nothing,AbstractVector}=nothing, observe=nothing, kwargs...)
-    N >= 0 || throw(ArgumentError("N must be nonnegative"))
-    (!refine || refine_step >= 0) || throw(ArgumentError("refine_step must be nonnegative"))
-    isnothing(observe) || observe(ψ, 0, nothing)
-    for k in 1:N
-        r = scarfinder_step!(ψ, mpos, χ; kwargs...)
-        isnothing(history) || push!(history, r)
-        isnothing(observe) || observe(ψ, k, r)
-    end
-    if refine
-        step! = state -> scarfinder_step!(state, refine_mpos, χ; kwargs...)
-        minimize_on_trajectory!(_refinement_objective, step!, ψ, refine_step)
-    end
-    return ψ
-end
-
-function scarfinder!(ψ::DenseIMPS, mpos::AbstractVector{<:iMPO}, h::Union{Nothing,AbstractMatrix},
-                     χ::Integer, N::Integer; kwargs...)
-    isnothing(h) && return scarfinder!(ψ, mpos, χ, N; kwargs...)
-    throw(ArgumentError("with MPOs, pass the Hamiltonian as `terms=[(h, i, j), …]`, " *
-                        "not as a matrix argument"))
 end
 
 export release_recorder

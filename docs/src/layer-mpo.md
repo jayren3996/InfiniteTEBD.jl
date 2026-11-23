@@ -3,9 +3,8 @@
 Gate-by-gate evolution with [`evolve!`](@ref) needs a unit cell at least as
 long as the gates: a three-site term needs three sites. When the physics has a
 shorter period (for instance two sites for a staggered chain), the longer cell
-is a repeated smaller cell, and truncating it bond by bond, as
-[`truncate_unitcell!`](@ref) or the SVD after each gate does, singles out some
-bonds. That can seed a spurious doubling of the cell, which an iterated
+is a repeated smaller cell, and truncating it bond by bond, as the SVD after each gate
+does, singles out some bonds. That can seed a spurious doubling of the cell, which an iterated
 projection such as ScarFinder then amplifies.
 
 Layer MPOs remove the need for the longer cell.
@@ -124,8 +123,7 @@ the generic update.
 [`truncate!`](@ref) is the bond-symmetric truncation: canonical form, then
 every bond keeps its own `χ` largest Schmidt values. Tiling a two-site state
 onto four sites and truncating gives the tiled truncated two-site state, so no
-cell doubling is generated. [`truncate_unitcell!`](@ref) keeps its previous
-behaviour (group the cell, split bond by bond).
+cell doubling is generated.
 
 For site-dependent Hamiltonians, `energy_density(ψ, terms)` takes a list of
 `(h, i, j)` and returns the energy per site, and [`energy_fix!`](@ref) moves

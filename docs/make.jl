@@ -20,9 +20,8 @@ makedocs(;
             "Symmetric MPS" => "symmetries.md",
             "Time Evolution" => "time-evolution.md",
             "Layer MPOs" => "layer-mpo.md",
-            "Constrained ScarFinder" => "scarfinder-mpo-workflow.md",
             "Observables" => "observables.md",
-            "ScarFinder Workflow" => "scarfinder.md",
+            "ScarFinder" => "scarfinder.md",
         ],
         "Reference" => [
             "API Reference" => "api.md",

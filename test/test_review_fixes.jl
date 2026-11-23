@@ -93,10 +93,10 @@ end
     end
 end
 
-@testset "_truncate_unitcell! n=1 stores B, not λ·B" begin
+@testset "truncate! n=1 stores B, not λ·B" begin
     psi = rand_iMPS(ComplexF64, 1, 2, 4)
     z_before = expect(psi, _RF_Z, 1, 1)
-    InfiniteTEBD._truncate_unitcell!(psi, 4)   # unchanged χ: must be a no-op
+    truncate!(psi, 4)   # unchanged χ: must be a no-op
     @test expect(psi, _RF_Z, 1, 1) ≈ z_before atol = 1e-6
 
     # stored tensor must satisfy the right-canonical condition Σ_s B_s B_s† = I

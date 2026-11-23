@@ -41,11 +41,16 @@ const _U = trotter_mpos(RBPXP.layers(), 0.05; n=2, gate_map=G -> RBPXP.P3 * G)
         @test length(hist) == 4 && [r.loss for r in hist] == [r.loss for r in loop]
         @test length.(a.λ) == length.(b.λ) == [2, 2]
     end
-    # refinement runs the same step; a matrix density is rejected for MPO sequences
+    # refinement runs the same step
     ψ = RBPXP.seed(0.45)
     @test scarfinder!(ψ, _U, 2, 2; refine=true, refine_step=3, nstep=4, maxdim=12) === ψ
-    @test_throws ArgumentError scarfinder!(RBPXP.seed(0.45), _U, kron(RBPXP.X, RBPXP.X), 2, 2)
-    @test_throws ArgumentError scarfinder_step!(RBPXP.seed(0.45), _U, kron(RBPXP.X, RBPXP.X), 2)
+    # a matrix density h stands for the terms (h, i, i + 1) on every site of the cell
+    hX = kron(RBPXP.X, RBPXP.X)
+    a, b = RBPXP.seed(0.45), RBPXP.seed(0.45)
+    t = energy_density(a, [(hX, 1, 2), (hX, 2, 3)]; n=2) + 0.01
+    ra = scarfinder_step!(a, _U, hX, 2; nstep=4, maxdim=12, target=t)
+    rb = scarfinder_step!(b, _U, 2; nstep=4, maxdim=12, target=t, terms=[(hX, 1, 2), (hX, 2, 3)], n=2)
+    @test ra == rb && a.Γ == b.Γ
 end
 
 @testset "fast path describes the stored operator" begin

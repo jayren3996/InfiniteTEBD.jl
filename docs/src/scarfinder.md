@@ -1,152 +1,104 @@
 # ScarFinder
 
 ScarFinder searches for low-entanglement, weakly thermalizing trajectories
-directly on the iMPS manifold. Given a trial state, a local update rule, and a
-target bond dimension `χ`, it repeatedly evolves, projects back to `χ`, and
-optionally corrects the energy density so the trajectory does not drift toward
-a featureless low-energy state.
-
-| Signature | Real-time gate | Energy correction | Typical use |
-|-----------|----------------|-------------------|-------------|
-| `scarfinder!(ψ, h, dt, χ, N; ...)` | `exp(-1im * dt * h)`, built internally | optional, against `h` | you have only the local density `h` |
-| `scarfinder!(ψ, G, χ, N; ...)` | user-supplied `G` | none | `G` is a prebuilt or Floquet step |
-| `scarfinder!(ψ, G, h, χ, N; ...)` | user-supplied `G` | optional, against `h` | constrained models such as PXP |
-| `scarfinder!(ψ, gates, χ, N; ...)` | ordered `(G, i, j)` updates | none | Floquet circuits and endpoint gates |
-| `scarfinder!(ψ, gates, h, χ, N; ...)` | ordered `(G, i, j)` updates | optional, against `h` | prepared dynamics with independent energy density |
-
-Each iteration has the same shape: real-time evolution at a temporary
-bond dimension `maxdim`, projection back to `χ`, and an optional imaginary-time
-nudge toward a target energy density. After `N` iterations the routine
-optionally scans a short refinement trajectory and keeps the minimum-entanglement
-point along it.
-
-## Second- and fourth-order evolution
-
-The Hamiltonian entry points `scarfinder!` and `scarfinder_step!` accept
-`trotter=:second`, `:fourth`, or `:fourth_opt`. The default `trotter=nothing`
-uses the original sequential sweep. For example, a three-site density on a
-six-site cell can use
+directly on a variational manifold. One iteration leaves the manifold and
+projects back onto it:
 
 ```julia
-scarfinder!(ψ, h, dt, χ, N; trotter=:fourth, nstep=10)
+evolve!(ψ, U, nstep; maxdim)        # evolve off the manifold
+r = project!(ψ, χ; terms, target)   # back to bond dimension χ at energy density target
 ```
 
-`uniform_layers(ψ, h)` places disjoint terms together. For a three-site
-interaction on a six-site cell this gives three layers, including the terms
-that cross the cell boundary. Other cell lengths can require more layers.
-The automatic grouping uses the fewest layers with disjoint supports.
-Use `layers=...` to supply a different commuting decomposition. For example,
-even and odd PXP centres form two commuting layers on an even cell and can
-use `trotter=:fourth_opt`. Explicit layers define the real-time dynamics.
-The density `h` still defines the energy when `target` is supplied.
+`scarfinder_step!(ψ, U, χ; …)` is exactly this pair, and
+`scarfinder!(ψ, U, χ, N; …)` runs `N` of them. `U` is anything
+[`evolve!`](@ref) accepts:
 
-One iteration completes `nstep` full Trotter steps before compressing. The
-refinement uses the same Trotter formula at `refine_dt`. To choose the order
-of operations yourself, compose the same functions directly:
+| `U` | Example |
+|-----|---------|
+| a sequence of `(G, i, j)` gates (matrices, [`EndpointGate`](@ref)s, [`ControlledGate`](@ref)s) | `trotter_gates(layers, dt; trotter=:second)` |
+| a vector of layer MPOs | `trotter_mpos(layers, dt; n=2)` |
+| a single local gate `G`, applied at every translation of the cell | `exp(-1im * dt * h)`, a Floquet or projected step `P * U` |
+
+For the iMPS manifold, [`project!`](@ref) is [`truncate!`](@ref) (every bond
+keeps its `χ` largest Schmidt values of the canonical form) followed, when
+`target` is given, by [`energy_fix!`](@ref) (normalized imaginary-time steps
+toward `target`). It returns `(loss, energy_error, converged)`:
+
+- `loss = −log F_site` between the evolved and the truncated state, before the
+  energy correction;
+- `energy_error = E(ψ) − target` after the correction (`nothing` without
+  `target`);
+- `converged`: whether the correction met `tol` (`true` without `target`).
+
+`scarfinder_step!` returns the same tuple. All inputs are validated before `ψ`
+changes. Another manifold can take part by defining its own `project!` with
+these fields, and an `evolve!` method for its evolution type.
+
+## The energy
+
+The energy is given by `terms`, a list of `(h, i, j)` (sites `i ≤ j` of the
+chain, repeated with period `n`) or of commuting layers of them, as for
+[`energy_fix!`](@ref). The period `n` defaults to the cell length of the first
+MPO, or `ψ.n`. Two shortcuts take a local density `h`, which stands for
+`(h, i, i + span − 1)` on every site of the cell:
 
 ```julia
-gates = trotter_gates(uniform_layers(ψ, h), dt; trotter=:fourth)
-for _ in 1:N
-    evolve!(ψ, gates, nstep; maxdim)
-    truncate_unitcell!(ψ, χ; cutoff, recanonicalize=true)
-    correction = fix_energy!(ψ, h, χ; target, tol)
-    correction.converged || break
-end
+scarfinder!(ψ, U, h, χ, N; target)               # any U, energy from h
+scarfinder!(ψ, h, dt, χ, N; target, trotter)      # U built from h and dt as well
 ```
 
-`fix_energy!` reports the measured residual in the state it leaves in `ψ`.
-Omit that call when the calculation has no target energy.
+In the `(h, dt)` form, `trotter=nothing` applies `exp(−i dt h)` at every
+translation of the cell, left to right; `trotter=:second`, `:fourth` or
+`:fourth_opt` uses `trotter_gates(uniform_layers(ψ, h), dt; trotter)`, and
+`layers=…` replaces the automatic grouping by a commuting decomposition of
+your own.
 
-## Prepared gate sequences
-
-Pass a vector or tuple of `(G, i, j)` updates to reuse the same prepared gates
-across ScarFinder iterations. A sequence can mix ordinary matrices, prepared
-[`EndpointGate`](@ref)s, and [`ControlledGate`](@ref)s, just as in [`evolve!`](@ref). Each iteration
-applies the sequence `nstep` times before projection.
+For constrained models the dynamics and the energy differ: the gates carry the
+projector, the energy is the bare Hamiltonian. Pass both:
 
 ```julia
-gates = trotter_gates(layers, dt; trotter=:second)
-refine_gates = trotter_gates(layers, dt / 10; trotter=:second)
-scarfinder!(ψ, gates, χ, N; nstep=10, maxdim, refine_gates)
+U = trotter_mpos(layers, dt; n=2, gate_map=G -> P3 * G)   # every gate is P3 * U
+scarfinder!(ψ, U, 2, N; terms=layers, target=e, n=2, nstep=20, maxdim=16, refine=false)
 ```
 
-With an independent energy density, use `scarfinder!(ψ, gates, h, χ, N; target)`.
-Use the corresponding `scarfinder_step!` signature to run one iteration.
-
-## Which interface should I use?
-
-Pick by the form of the update rule.
-
-- If your dynamics is `H` and you only have the local density `h`, use
-  `scarfinder!(ψ, h, dt, χ, N; ...)`. This is the simplest path.
-- If your update is already packaged as a gate (for example a Floquet step, or
-  a precomputed `exp(-1im * dt * h)` you intend to reuse), and you do not need
-  an energy constraint, use `scarfinder!(ψ, G, χ, N; ...)`.
-- For constrained models such as PXP, where `G` carries projectors that repair
-  the physical subspace after truncation, use `scarfinder!(ψ, G, h, χ, N; ...)`.
-  The projected gate drives the dynamics while the unprojected Hamiltonian
-  density `h` defines the energy target. Conflating the two leads to wrong
-  energy corrections.
-
-## Positional arguments
-
-- `ψ` — the trial `iMPS`, updated in place.
-- `h` — a local Hamiltonian density on a contiguous window of the unit cell.
-  Its support can be inferred by `operator_span(ψ, h)`.
-- `G` — a local gate on a contiguous window. Used by the gate-based and mixed
-  interfaces.
-- `dt` — microscopic real-time step used to build `exp(-1im * dt * h)` in the
-  Hamiltonian-based interface.
-- `χ` — upper bound on each bond dimension after projection.
-- `N` — number of ScarFinder iterations.
+The correction uses ordinary imaginary-time gates built from `terms`. The next
+real-time window projects out the small leakage introduced by it; measure it
+with `constraint_leakage(ψ, Blockade())`.
 
 ## Keyword arguments
 
-Evolution and projection:
+- `nstep=10`: microscopic steps per iteration. One iteration covers physical
+  time `Δt ≈ nstep · dt`; `nstep = 1` warns, since one step followed by a hard
+  projection is usually too aggressive.
+- `maxdim=MAXDIM`: bond dimension the evolution may grow into before the
+  projection to `χ`; typically larger than `χ`.
+- `cutoff=SVDTOL`: singular-value cutoff of the evolution and the projection.
+- `terms`, `target=nothing`, `tol=1e-6`, `alpha=0.1`, `maxstep=50`, `n`: energy
+  correction, see [`energy_fix!`](@ref).
+- `refine=true`, `refine_step=100`, `refine_U=U` (`refine_dt=dt/10` in the
+  `(h, dt)` form): after the `N` iterations, scan `refine_step` further steps
+  with `refine_U` and keep the state of lowest maximal bond entropy. Use
+  `refine=false` whenever you select your own representative.
+- `history`: a vector that collects the `N` results.
+- `observe`: a function `f(ψ, k, r)`, called with `k = 0` and `r = nothing` on
+  the initial state and after each iteration with the candidate and its
+  result. `ψ` is the live state; copy it to keep it. Refinement samples are
+  neither observed nor in `history`.
 
-- `nstep` — microscopic evolution steps before each projection. One ScarFinder
-  iteration covers physical time `Δt ≈ nstep * dt`.
-- `maxdim=MAXDIM` — temporary bond dimension during real-time evolution.
-- `cutoff=SVDTOL` — SVD cutoff used during the projection step.
-- `recanonicalize=true` — restore the canonical gauge after a local compression
-  sweep and before measuring energy-fixing trials on large cells. The local gauge
-  solve preserves the retained bond dimensions and assumes an injective state
-  with full numerical support. Use `false` to reproduce the earlier large-cell
-  workflow, where energies and entropies use the spectra from the local updates.
-  Small grouped cells include canonicalization in the projection itself.
-  In the local sweep, wide cuts use an LQ of the right tensor to obtain the
-  same nonzero singular values without forming a fused two-site tensor.
+## Composing the loop yourself
 
-Support widths:
+```julia
+gates = trotter_gates(uniform_layers(ψ, h), dt; trotter=:fourth)
+terms = [(h, i, i + 2) for i in 1:ψ.n]
+for _ in 1:N
+    evolve!(ψ, gates, nstep; maxdim)
+    r = project!(ψ, χ; terms, target)
+    r.converged || break
+end
+```
 
-- `span=operator_span(ψ, G_or_h)` — number of sites the real-time gate acts on.
-  In the Hamiltonian-based interface this refers to `h`; in the gate-based and
-  mixed interfaces it refers to `G`.
-- `hspan=operator_span(ψ, h)` — number of sites the Hamiltonian density acts on
-  during energy fixing in the mixed interface.
-
-Energy fixing:
-
-- `target=nothing` — target energy density. Leave as `nothing` to disable
-  energy correction.
-- `tol=1e-6` — stop the energy-fixing loop once `|E - target| ≤ tol`.
-- `α=0.1` — initial step-size parameter for the imaginary-time correction.
-- `maxstep=50` — maximum trial sweeps inside one energy-fixing call.
-
-Refinement scan (run once after the `N` iterations):
-
-- `refine=true` — scan a short trajectory and keep the minimum-entanglement
-  point.
-- `refine_step=100` — number of trial points used in the scan.
-- `refine_dt=dt/10` — microscopic step used during the scan (Hamiltonian-based
-  interface only).
-- `refine_gates=gates` — sequence used for refinement with prepared gate lists.
-
-### Choose a point on a custom trajectory
-
-Use [`minimize_on_trajectory!`](@ref) to control which step and objective the
-scan uses. For example, the step below advances by one prepared gate sequence,
-and the objective is the largest bond entropy in the unit cell.
+[`minimize_on_trajectory!`](@ref) is the refinement scan with your own step
+and objective:
 
 ```julia
 advance!(state) = evolve!(state, gates, 1; maxdim)
@@ -154,50 +106,30 @@ objective(state) = maximum(i -> ent_S(state, i), 1:state.n)
 selection = minimize_on_trajectory!(objective, advance!, ψ, 50)
 ```
 
-The scan considers `ψ` at step zero and after each of the 50 trial steps. It
-writes the first minimizing state back into `ψ` and returns its step number
-and measured objective as `selection.step` and `selection.value`.
+It considers `ψ` and the states after each of the 50 steps, writes the first
+minimizer into `ψ` and returns `selection.step` and `selection.value`.
 
-## Two time scales: `dt` vs `nstep`
+## Recording a release
 
-`dt` is the microscopic gate time; `nstep` is how many of those microscopic
-steps fit inside one ScarFinder iteration. If you want each iteration to cover
-physical time `Δt`, set `nstep ≈ Δt / dt`. With `dt = 0.01` and `Δt = 0.05`,
-that means `nstep = 5`.
+`evolve!(ψ, mpos, steps; observe=f, every=k)` calls `f(φ, s, stats)` at
+`s = 0`, every `k` complete Trotter steps, and at the last step. `φ` is the
+state at time `s·dt`, identical to `evolve!(copy, mpos, s)` from the same
+input; at a merged half-step boundary the pending half step is applied to a
+snapshot, and the main trajectory is unchanged. Splitting a window into
+single-step calls instead changes the integrator: at χ = 2, ten calls of
+`evolve!(…, 1)` differed from one ten-step window by `1.36e-5` in `n_A`.
 
-`nstep = 1` is accepted for backward compatibility but emits a warning: one
-microscopic step followed by a hard projection back to `χ` is usually too
-aggressive a truncation cycle to represent the intended coarse-grained flow.
-
-## Two bond dimensions: `maxdim` vs `χ`
-
-`maxdim` is the temporary headroom that real-time evolution may grow into
-before each projection. `χ` is where the state lands after the projection.
-Typically `maxdim ≥ χ`, often strictly larger so the evolution has room to
-represent transient growth that the projection then prunes.
-
-## Helper functions
-
-- [`operator_span`](@ref) infers the support of a local operator from the
-  local Hilbert-space dimension of `ψ`.
-- [`energy_density`](@ref) returns the unit-cell averaged expectation value of
-  a local operator.
-- [`energy_span`](@ref) estimates the lowest and highest energy densities
-  reachable by imaginary-time iTEBD with `h`. Useful for picking a `target`.
+[`release_recorder`](@ref) records physical time, bond entropies, retained
+dimensions, discarded weight, `num_saturated` (requested dimension exceeded the
+cap), `num_at_cap` (retained dimension equal to the cap), site occupations and
+the per-site return fidelity. How to turn these into a score is up to the
+caller.
 
 ## A complete PXP example
 
-The example below uses the mixed interface and reproduces the standard
-ScarFinder workflow on the PXP model. The gate `G` contains a two-site
-blockade projector that restores the Rydberg-constraint subspace after each
-truncation; the energy target is matched to the energy density of the
-initial Z2 product state, which is what the scar trajectory should approximately
-preserve.
-
-After the run, two numbers tell you whether ScarFinder converged in the
-expected sense: `final_energy` should be close to `target_energy`, and
-`maxbond` should sit at or below `χ` (here `χ = 2`). The state is also
-small enough to inspect bond-by-bond if you want.
+The gate `G` contains a two-site blockade projector that restores the
+Rydberg-constraint subspace after each truncation; the energy target is that
+of the initial Z2 product state.
 
 ```@example
 using InfiniteTEBD
@@ -206,59 +138,40 @@ using LinearAlgebra
 P0 = [0 0; 0 1]
 N1 = [1 0; 0 0]
 X = [0 1; 1 0]
-
-# Three-site PXP Hamiltonian density.
-h_pxp = kron(P0, X, P0)
-
-# Two-site blockade projector used to repair truncation artifacts.
-no_double_2 = Matrix{Float64}(I, 4, 4) - kron(N1, N1)
-
-# Gate used during ScarFinder evolution.
+h_pxp = kron(P0, X, P0)                                  # three-site PXP density
+no_double_2 = Matrix{Float64}(I, 4, 4) - kron(N1, N1)    # two-site blockade
 dt = 0.01
 G = kron(no_double_2, I(2)) * kron(I(2), no_double_2) * exp(-1im * dt * h_pxp)
 
-# Four-site Z2 product state.
 psi = product_iMPS(ComplexF64, [[0, 1], [1, 0], [0, 1], [1, 0]])
+target = energy_density(psi, h_pxp)
 
-# Match the energy density of the initial Z2 state.
-target = energy_density(psi, h_pxp; span=3)
+# One ScarFinder iteration represents Δt = 0.05.
+scarfinder!(psi, G, h_pxp, 2, 5; nstep=5, target, maxdim=12, refine=false)
 
-# Here one ScarFinder step represents roughly Δt = 0.05.
-scarfinder!(psi, G, h_pxp, 2, 5;
-    span=3,
-    hspan=3,
-    nstep=5,
-    target=target,
-    maxdim=12,
-    refine=false,
-)
-
-(;
-    target_energy=target,
-    final_energy=energy_density(psi, h_pxp; span=3),
-    maxbond=maximum(length.(psi.λ)),
-)
+(; target_energy=target, final_energy=energy_density(psi, h_pxp),
+   maxbond=maximum(length.(psi.λ)))
 ```
 
-## Diagnostics during a run
+A full grid point of the staggered PXP phase diagram, with seeds, recording
+and a release, is `examples/pxp_scarfinder_point.jl`.
 
-Between successive `scarfinder!` calls (or between blocks of iterations) it is
-worth tracking two cheap quantities:
+## Notes
 
-- `energy_density(psi, h; span=...)` — should stay close to `target` once
-  energy fixing has settled. A drift that the energy-fixing loop cannot close
-  usually means `α` is too small, `maxstep` is too small, or `target` is
-  outside the manifold reachable at the chosen `χ`.
-- `maximum(length.(psi.λ))` — the largest bond dimension currently used. If
-  this saturates at `χ` after every iteration, the projection is doing real
-  work; if it sits well below `χ`, you can probably reduce `χ` (and the cost).
+- `rand_iMPS(rng, T, n, d, dim)` draws from the same uniform distribution as
+  `rand_iMPS(T, n, d, dim)`; derive one RNG per task from
+  `(grid point, seed id)` for reproducible runs.
+- `translate(ψ, k)` shifts the site tensors with their spectra. On the
+  staggered chain a one-site translation maps `H(μ, δ)` to `H(μ, −δ)`.
+- `per_site_fidelity` returns the amplitude `|⟨a|b⟩|^(1/n)`; a squared per-site
+  overlap is its square.
+- `constraint_leakage` is the per-site negative log of the legal amplitude, not
+  the maximal double occupancy.
+- [`energy_span`](@ref) estimates the lowest and highest energy densities
+  reachable by imaginary-time evolution with `h`, useful for picking `target`.
 
 ## Reference
 
-The implementation follows the algorithm in:
-
-- J. Ren, A. Hallam, L. Ying, and Z. Papić, [ScarFinder: A Detector of Optimal
-  Scar Trajectories in Quantum Many-Body Dynamics](https://eprints.whiterose.ac.uk/id/eprint/238368/),
-  PRX Quantum 6, 040332 (2025).
-
-The generated function reference lives on [API Reference](api.md).
+J. Ren, A. Hallam, L. Ying, and Z. Papić, [ScarFinder: A Detector of Optimal
+Scar Trajectories in Quantum Many-Body Dynamics](https://eprints.whiterose.ac.uk/id/eprint/238368/),
+PRX Quantum 6, 040332 (2025).

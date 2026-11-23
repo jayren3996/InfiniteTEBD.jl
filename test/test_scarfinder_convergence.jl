@@ -28,7 +28,7 @@ using .TestUtils: pauli_matrices
     χ, N, dt = 2, 3, 0.02
 
     # No `target` → energy fixing disabled; pure projection-after-evolution loop.
-    scarfinder!(psi, h, dt, χ, N; span=3, nstep=3, maxdim=8, refine=false)
+    scarfinder!(psi, h, dt, χ, N; nstep=3, maxdim=8, refine=false)
 
     @test maximum(length.(psi.λ)) <= χ
     @test isapprox(inner_product(psi), 1.0; atol=1e-8)
@@ -46,7 +46,7 @@ end
 
     χ, N, dt = 2, 3, 0.02
     scarfinder!(psi, h, dt, χ, N;
-        span=3, nstep=3, maxdim=8, target=target, refine=false)
+        nstep=3, maxdim=8, target=target, refine=false)
 
     @test maximum(length.(psi.λ)) <= χ
     final_energy = energy_density(psi, h; span=3)
@@ -71,7 +71,7 @@ end
     psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
     χ, N = 2, 3
 
-    scarfinder!(psi, G, χ, N; span=2, nstep=3, maxdim=4, refine=false)
+    scarfinder!(psi, G, χ, N; nstep=3, maxdim=4, refine=false)
 
     @test maximum(length.(psi.λ)) <= χ
     @test isapprox(inner_product(psi), 1.0; atol=1e-8)
@@ -100,7 +100,7 @@ end
 
     χ, N = 2, 3
     scarfinder!(psi, G, h_pxp, χ, N;
-        span=3, hspan=3, nstep=3, target=target, maxdim=12, refine=false)
+        nstep=3, target=target, maxdim=12, refine=false)
 
     @test maximum(length.(psi.λ)) <= χ
     final_energy = energy_density(psi, h_pxp; span=3)
@@ -129,7 +129,7 @@ end
     target = energy_density(psi_no_refine, h_pxp; span=3)
 
     χ, N = 2, 3
-    common_kwargs = (span=3, hspan=3, nstep=3, target=target, maxdim=12)
+    common_kwargs = (nstep=3, target=target, maxdim=12)
 
     scarfinder!(psi_no_refine, G, h_pxp, χ, N; refine=false,                            common_kwargs...)
     scarfinder!(psi_refine,    G, h_pxp, χ, N; refine=true, refine_step=20,             common_kwargs...)

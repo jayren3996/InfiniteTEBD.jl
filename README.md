@@ -35,7 +35,7 @@ conditions, and canonicalization assumes an injective iMPS throughout. For finit
 | 🧱 **Layer MPOs** | Exact infinite MPOs of commuting gate layers (`layer_mpo`, `trotter_mpos`, `apply!`), so three-site terms run on a two-site cell. |
 | 📐 **Schmidt canonicalization** | Injective-setting canonical form via `canonical!`. |
 | 📊 **Transfer-matrix observables** | Overlaps, multi-site expectation values, entanglement entropy, and energy density. |
-| 🎯 **ScarFinder search** | Low-entanglement trajectories via Hamiltonian, gate, and mixed interfaces (`scarfinder!`). |
+| 🎯 **ScarFinder search** | Low-entanglement trajectories: `evolve!` off the manifold, `project!` back (`scarfinder!`). |
 | ⚛️ **Abelian-symmetric tensors** | `:U1`, `:Z2`, and products through an optional TensorKit extension. |
 | 🪜 **Adaptive bond dimension** | A ratchet on bond growth (`adaptive_bonddim`, `natural_bonddim`). |
 
@@ -127,19 +127,18 @@ weakly-thermalizing trajectories directly on the iMPS manifold. Each iteration e
 for a short real-time interval, projects back to a target bond dimension `χ`, and optionally
 applies a small imaginary-time correction to hold the energy density near a chosen target.
 
-Three interfaces are exposed:
+One iteration is `evolve!(ψ, U, nstep)` followed by `project!(ψ, χ; terms, target)`, so the
+same driver works for any evolution `evolve!` accepts:
 
 ```julia
-scarfinder!(ψ, h, dt, χ, N; ...)    # Hamiltonian-based
-scarfinder!(ψ, G, χ, N; ...)        # gate-based, no energy correction
-scarfinder!(ψ, G, h, χ, N; ...)     # mixed: custom gate G, energy fixed against h
+scarfinder!(ψ, U, χ, N; terms, target)   # U: gate list, layer MPOs or one local gate
+scarfinder!(ψ, U, h, χ, N; target)       # energy from a uniform density h
+scarfinder!(ψ, h, dt, χ, N; target)      # U built from h and dt
 ```
 
-The mixed form is the recommended one for constrained models like PXP, where the gate carries
-projectors that repair truncation artifacts while the energy target is defined against the
-unprojected Hamiltonian density. See the
-[ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) page for the
-complete PXP example.
+For constrained models like PXP, `U` carries the projector while the energy is the bare
+Hamiltonian. See the [ScarFinder](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/)
+page for the complete PXP example.
 
 </details>
 
@@ -215,7 +214,7 @@ Full documentation lives at
 - [Time Evolution](https://jayren3996.github.io/InfiniteTEBD.jl/dev/time-evolution/) — `applygate!`, `evolve!`, Trotter order, adaptive bond dimension.
 - [Layer MPOs](https://jayren3996.github.io/InfiniteTEBD.jl/dev/layer-mpo/) — exact MPOs of commuting gate layers, `apply!`, `truncate!`, site-dependent energy fixing.
 - [Observables](https://jayren3996.github.io/InfiniteTEBD.jl/dev/observables/) — overlaps, expectation values, entropy, energy density.
-- [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) — the three interfaces, the two time scales, the PXP example.
+- [ScarFinder Workflow](https://jayren3996.github.io/InfiniteTEBD.jl/dev/scarfinder/) — evolve and project, the energy, the PXP example.
 - [API Reference](https://jayren3996.github.io/InfiniteTEBD.jl/dev/api/) — generated from docstrings.
 
 ## 🗂 Examples
@@ -237,7 +236,7 @@ Runnable Jupyter notebooks live in [`examples/`](examples):
 | [`src/Schmidt.jl`](src/Schmidt.jl) | Schmidt decomposition and the discarded-weight truncation controller |
 | [`src/Contractions.jl`](src/Contractions.jl), [`src/TensorAlgebra.jl`](src/TensorAlgebra.jl) | Transfer-matrix factors and the low-level tensor contractions |
 | [`src/Krylov.jl`](src/Krylov.jl) | Dominant transfer-matrix eigenvalue via KrylovKit |
-| [`src/ScarFinder.jl`](src/ScarFinder.jl) | `scarfinder!`, `energy_density`, `energy_span`, `operator_span` |
+| [`src/ScarFinder.jl`](src/ScarFinder.jl) | `scarfinder!`, `project!`, `energy_density`, `energy_span`, `operator_span` |
 | [`src/Miscellaneous.jl`](src/Miscellaneous.jl) | `inner_product` and the adaptive bond-dimension helpers |
 | [`src/SymmetricStubs.jl`](src/SymmetricStubs.jl) | Entry points for the symmetric API that require TensorKit |
 | [`ext/InfiniteTEBDTensorKitExt.jl`](ext/InfiniteTEBDTensorKitExt.jl) | TensorKit-backed Abelian-symmetric implementation |
