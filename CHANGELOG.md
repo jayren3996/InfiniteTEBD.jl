@@ -67,6 +67,12 @@ Layer MPOs and ScarFinder building blocks.
   and validates Hamiltonian term sizes before mutating the state.
   `CanonicalFormError` identifies non-converged canonicalization.
 
+### Changed
+
+- Apply prepared `EndpointGate` and `ControlledGate` objects with `applygate!`.
+  Set `op_rtol` when preparing an `EndpointGate`. The compatibility entry
+  point `apply_endpoint_gate!` still accepts two-site matrices and SWAP routing.
+
 ### Notes
 
 - `apply!` follows Orús–Vidal (contract, canonicalize, truncate all bonds) with

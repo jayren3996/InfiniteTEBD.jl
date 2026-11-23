@@ -10,7 +10,6 @@ const TEST_GROUPS = Dict(
         "test_tensor_algebra.jl",
         "test_observables.jl",
         "test_adaptive_bonddim.jl",
-        "test_imps_canonical_api.jl",
         "test_gate_api.jl",
         "test_krylov.jl",
         "test_scarfinder_api.jl",
@@ -21,24 +20,36 @@ const TEST_GROUPS = Dict(
         "test_imps_fixes.jl",
         "test_review_fixes.jl",
         "test_itensors_interop.jl",
+    ],
+    "canonical" => [
+        "test_imps_canonical_api.jl",
+    ],
+    "symmetric" => [
         "test_symmetric_struct.jl",
         "test_symmetric_basic.jl",
         "test_symmetric_construction.jl",
+        "test_precompile_workload.jl",
+    ],
+    "mpo" => [
         "test_layer_mpo.jl",
         "test_controlled_layer.jl",
         "test_constraint_diagnostics.jl",
         "test_release_blockers.jl",
         "test_scarfinder_workflow.jl",
+        "test_pxp_mpo.jl",
     ],
     "api" => [
         "test_truncation_control.jl",
         "test_evolve_api.jl",
         "test_scarfinder_nstep.jl",
-        "test_pxp_mpo.jl",
     ],
     "smoke" => [
         "test_docs_smoke.jl",
-        "test_precompile_workload.jl",
+    ],
+    "fast" => [
+        "test_gate_api.jl",
+        "test_truncation_control.jl",
+        "test_scarfinder_workflow.jl",
     ],
     "bench" => [
         "test_bench_smoke.jl",
@@ -50,10 +61,13 @@ const TEST_GROUPS = Dict(
     ],
 )
 
+const DENSE_TEST_GROUPS = ["unit", "api", "canonical", "smoke"]
+const DEFAULT_TEST_GROUPS = [DENSE_TEST_GROUPS..., "symmetric", "mpo", "integration"]
+
 const TEST_ALIASES = Dict(
-    "default" => ["unit", "api", "smoke", "integration"],
-    "fast" => ["unit", "api", "smoke"],
-    "all" => ["unit", "api", "smoke", "bench", "integration"],
+    "default" => DEFAULT_TEST_GROUPS,
+    "dense" => DENSE_TEST_GROUPS,
+    "all" => [DEFAULT_TEST_GROUPS..., "bench"],
     "long" => ["integration"],
 )
 
@@ -105,7 +119,7 @@ const REQUESTED_FILES = isempty(ARGS) ? _selected_test_files(REQUESTED_GROUPS) :
 
 @info "Running InfiniteTEBD test groups" groups=REQUESTED_GROUPS files=REQUESTED_FILES
 
-@testset "InfiniteTEBD.jl" begin
+@testset verbose=true "InfiniteTEBD.jl" begin
     for file in REQUESTED_FILES
         @testset "$file" begin
             include(joinpath(TEST_ROOT, file))

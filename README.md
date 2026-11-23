@@ -244,6 +244,31 @@ Runnable Jupyter notebooks live in [`examples/`](examples):
 | [`docs/`](docs) | Documenter manual and worked examples |
 | [`examples/`](examples) | Runnable Jupyter notebooks |
 
+## Running tests
+
+For local gate and PXP changes, run the fast group from the repository root.
+
+```bash
+ITEBD_TEST_GROUP=fast julia -O1 --project=. test/runtests.jl
+```
+
+This exercises gate updates, truncation controls and the PXP workflow, including
+its bitwise comparison against an explicit loop. The test summary gives elapsed
+time per file. To run only specific tests, pass their filenames.
+
+```bash
+julia --project=. test/runtests.jl test_gate_api.jl test_evolve_api.jl
+```
+
+Run `julia --project=. -e 'using Pkg; Pkg.test()'` for the default suite,
+including TensorKit and integration tests. Set `ITEBD_TEST_GROUP` to
+`dense`, `canonical`, `symmetric` or `mpo` to focus the run.
+Use `Pkg.test()` for TensorKit tests to load the test dependencies.
+For a quicker local run of the compilation-heavy canonical tests, use
+`ITEBD_TEST_GROUP=canonical julia -O1 --project=. test/runtests.jl`.
+CI uses Julia's default optimization level and runs the test groups in parallel.
+The Documentation workflow owns the full docs build.
+
 ## 📝 Citation
 
 If the ScarFinder routines are useful in your published work, please cite:

@@ -194,6 +194,46 @@ end
     @test_throws DimensionMismatch apply_endpoint_gate!(template, X, 1, 4)
 end
 
+@testset "PREPARED_GATE_APPLICATION" begin
+    rng = MersenneTwister(422)
+    ψ = rand_iMPS(rng, ComplexF64, 4, 2, 3)
+    X = ComplexF64[0 1; 1 0]
+    P = Diagonal([1.0, 0.0])
+    pair = exp(-0.1im * kron(X, X))
+    endpoint = EndpointGate(pair, (2, 2); op_rtol=1e-12)
+    controlled = ControlledGate(P, exp(-0.1im * X), P)
+
+    for (i, j) in ((1, 3), (3, 1))
+        a, b = deepcopy(ψ), deepcopy(ψ)
+        _, prepared_stats = applygate!(a, endpoint, i, j; maxdim=2, return_stats=true)
+        _, legacy_stats = apply_endpoint_gate!(b, pair, i, j; op_rtol=1e-12, maxdim=2, return_stats=true)
+        @test a.Γ == b.Γ && a.λ == b.λ
+        @test prepared_stats == legacy_stats
+        c = deepcopy(ψ)
+        @test apply_endpoint_gate!(c, endpoint, i, j) === c
+
+        for gate in (endpoint, controlled)
+            actual = applygate!(deepcopy(ψ), gate, i, j; maxdim=2, recanonicalize=true)
+            expected = applygate!(deepcopy(ψ), gate, i, j; maxdim=2)
+            if gate isa EndpointGate || j < i
+                canonical!(expected; maxdim=2)
+            end
+            @test actual.Γ == expected.Γ && actual.λ == expected.λ
+        end
+    end
+    @test_throws MethodError applygate!(ψ, endpoint, 1, 3; op_rtol=1e-12)
+    @test_throws MethodError applygate!(ψ, endpoint, 1, 3; method=:mpo)
+
+    # A non-injective state passes the local update but fails the gauge check.
+    A = zeros(ComplexF64, 2, 2, 2)
+    A[1, 1, 1] = A[2, 2, 2] = 1
+    state = iMPS([copy(A) for _ in 1:3], [fill(inv(sqrt(2.0)), 2) for _ in 1:3], 3)
+    before = deepcopy(state)
+    id_gate = EndpointGate(Matrix{ComplexF64}(I, 4, 4), (2, 2))
+    @test_throws ArgumentError applygate!(state, id_gate, 1, 3; gauge=:auto)
+    @test state.Γ == before.Γ && state.λ == before.λ
+end
+
 @testset "GATE_INDICES_NON_WRAPPING" begin
     psi = product_iMPS(ComplexF64, [[1,0], [0,1], [1,0]])
     inds = InfiniteTEBD._gate_indices(psi, 1, 2)
