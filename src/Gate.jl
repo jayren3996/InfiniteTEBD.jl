@@ -811,14 +811,14 @@ export evolve!
 Apply a sequence of local gates repeatedly for `steps` sweeps.
 
 Each element of `gates` must be a tuple `(G, i, j)`. A matrix acts on the full
-periodic interval `i:j`. A prepared [`EndpointGate`](@ref) acts only at its
-two endpoints.
+periodic interval `i:j`. A prepared [`EndpointGate`](@ref) acts at its
+two endpoints. A [`ControlledGate`](@ref) acts on a three-site interval.
 
 Parameters:
 - `ψ`
   State to evolve in place.
 - `gates`
-  Iterable of `(G, i, j)` tuples, with matrices or prepared endpoint gates.
+  Iterable of `(G, i, j)` tuples, with matrices or prepared gates.
 - `steps`
   Number of full sweeps through the gate list.
 

@@ -50,7 +50,7 @@ dimensions left by the local SVD, and requires full numerical support on
 those bonds.
 
 The older `recanonicalize=true` keyword runs the truncating `canonical!`
-after a wrap gate, or after any update made with `apply_endpoint_gate!`.
+after a wrap gate, or after any endpoint gate update.
 Use either `gauge` or `recanonicalize` in a call. The returned bond statistics
 describe the local gate cuts.
 
@@ -135,7 +135,7 @@ Both reconstruction paths use the same SVD truncation rule and statistics.
 
 ## Gates on two separated endpoints
 
-Use [`apply_endpoint_gate!`](@ref) when a two-site gate acts on the endpoints
+Use [`EndpointGate`](@ref) with [`applygate!`](@ref) when a two-site gate acts on the endpoints
 of a longer interval. Its matrix has size `(dleft*dright) × (dleft*dright)`.
 `applygate!` with an ordinary matrix still acts on every physical leg of
 the contiguous interval.
@@ -146,10 +146,10 @@ using LinearAlgebra
 d = 2
 z = [1, -1]
 G = Diagonal(exp.(-0.1im .* kron(z, z)))
-apply_endpoint_gate!(ψ, G, 5, 2; maxdim=32)
-
-# Prepare once, then reuse in the usual gate-list interface.
 gate = EndpointGate(G, (d, d))
+applygate!(ψ, gate, 5, 2; maxdim=32)
+
+# Reuse the same prepared gate in an evolution sequence.
 evolve!(ψ, [(gate, 5, 2)], 10; maxdim=32)
 ```
 
@@ -162,12 +162,15 @@ sites. A right-to-left LQ sweep transports these factors along the interval.
 A left-to-right SVD sweep applies the usual bond truncation rule. This
 avoids both the fused interval tensor and explicit identity tensors between
 the endpoints. A `Diagonal` input uses the phase table directly during
-preparation and during a contiguous diagonal update. The optional
-`method=:swap` route performs ordinary physical-leg swaps and can truncate
-at additional cuts. Compare the two methods at matched error when choosing
-the working bond dimension. A prepared `EndpointGate` can also be used with
-`expect` to measure a two-site operator across the interval on a
+preparation and during a contiguous diagonal update. Set the operator Schmidt
+cutoff with `EndpointGate(G, (dleft, dright); op_rtol)` and pass state
+truncation controls to `applygate!`. A prepared `EndpointGate` also works
+with `expect` to measure a two-site operator across the interval on a
 Schmidt-canonical state.
+
+[`apply_endpoint_gate!`](@ref) supports existing calls with a two-site
+matrix, including `method=:swap`. The SWAP route can truncate at extra cuts
+during routing.
 
 To prepare a Hermitian product term directly, use
 `EndpointGate(A, B, -im*dt)`. It diagonalizes the two local operators and

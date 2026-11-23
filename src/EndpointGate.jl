@@ -53,8 +53,10 @@ end
     EndpointGate(G, (dleft, dright); op_rtol=nothing)
 
 Prepare the operator Schmidt factors of a two-site gate once. Reuse the
-result with `apply_endpoint_gate!` or in an `evolve!` list of
+result with [`applygate!`](@ref) or in an `evolve!` list of
 `(gate, i, j)` tuples. The factor matrices are shared across applications.
+`op_rtol` defaults to a roundoff threshold. Use zero to retain all
+positive operator Schmidt values.
 """
 function EndpointGate(G::AbstractMatrix, dims::Tuple{Integer,Integer}; op_rtol::Union{Nothing,Real}=nothing)
     dl, dr = dims
@@ -241,30 +243,81 @@ function _check_endpoint_dimensions(ψ, G::EndpointGate, inds)
     return nothing
 end
 
+function _finish_endpoint_update!(ψ, trial, inds, stats, controls; recanonicalize, gauge)
+    recanonicalize && canonical!(trial; maxdim=controls.maxdim, cutoff=controls.svd_min,
+                                  renormalize=controls.renormalize)
+    isnothing(gauge) || restore_canonical!(trial; method=gauge)
+    ψ.Γ .= trial.Γ
+    ψ.λ .= trial.λ
+    return controls.return_stats ? (ψ, _gate_update_stats(first(inds), last(inds), stats)) : ψ
+end
+
+function _apply_factored_endpoint!(ψ, gate, inds, controls; middle=nothing, recanonicalize, gauge)
+    # The kernel replaces tensors and spectra, so copying their containers
+    # suffices to keep the input intact until the update and gauge checks pass.
+    trial = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
+    stats = _endpoint_mpo!(trial, gate, inds; controls..., middle)
+    return _finish_endpoint_update!(ψ, trial, inds, stats, controls; recanonicalize, gauge)
+end
+
+"""
+    applygate!(ψ, gate::Union{EndpointGate,ControlledGate}, i, j; kwargs...)
+
+Apply a prepared gate on the forward periodic interval from `i` to `j`.
+The interval must fit in one unit cell. [`EndpointGate`](@ref) acts on its
+two ends. [`ControlledGate`](@ref) requires a three-site interval.
+
+The usual truncation controls apply to the state. Set the operator Schmidt
+cutoff `op_rtol` when constructing an `EndpointGate`.
+`return_stats=true` reports local bond cuts in sweep order.
+`recanonicalize=true` runs `canonical!` after an endpoint update or after
+a controlled update that crosses the cell seam. This can truncate bonds
+outside the interval and is excluded from the local cut statistics. Use
+`gauge=:auto` (or `:gram` or `:qr`) for fixed-dimension gauge restoration.
+"""
+function applygate!(ψ::DenseIMPS, gate::Union{EndpointGate,ControlledGate}, i::Integer, j::Integer;
+    maxdim::Integer=MAXDIM, mindim::Integer=1, truncerr::Real=0.0,
+    svd_min::Union{Nothing,Real}=nothing, cutoff::Union{Nothing,Real}=nothing,
+    renormalize::Bool=true, recanonicalize::Bool=false, gauge::Union{Nothing,Symbol}=nothing,
+    return_stats::Bool=false)
+    svd_floor = _resolve_svd_min(svd_min, cutoff)
+    _validate_truncation_args(maxdim, mindim, truncerr, svd_floor)
+    _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
+    inds = _endpoint_indices(ψ, i, j)
+    if gate isa ControlledGate
+        length(inds) == 3 || throw(ArgumentError("a ControlledGate requires a three-site interval"))
+        ends, middle = gate.ends, gate.center_delta
+        _check_endpoint_dimensions(ψ, ends, inds)
+        d = size(ψ.Γ[inds[2]], 2)
+        size(middle) == (d, d) ||
+            throw(DimensionMismatch("central gate dimension must match the central site"))
+        _check_gate_eltype(ψ, middle)
+        recanonicalize = recanonicalize && last(inds) < first(inds)
+    else
+        ends, middle = gate, nothing
+        _check_endpoint_dimensions(ψ, ends, inds)
+        _check_gate_eltype(ψ, first(ends.left))
+        _check_gate_eltype(ψ, first(ends.right))
+    end
+
+    controls = (; maxdim, mindim, truncerr, svd_min=svd_floor, renormalize, return_stats)
+    return _apply_factored_endpoint!(ψ, ends, inds, controls; middle, recanonicalize, gauge)
+end
+
 """
     apply_endpoint_gate!(ψ, G, i, j; method=:mpo, op_rtol=nothing, kwargs...)
 
-Apply a two-site gate to the endpoints of the forward periodic interval
-from `i` to `j` on a Schmidt-canonical dense iMPS. Endpoints must be
-distinct and the interval must fit in one unit cell. `G` uses the usual
-`kron(left, right)` convention.
+Compatibility entry point for a two-site matrix in the usual
+`kron(left, right)` convention acting at the ends of the forward interval
+from `i` to `j`. For prepared gates use [`applygate!`](@ref).
 
-The default `:mpo` backend sweeps the interval using operator Schmidt
-factors. Pass a matrix or a prepared [`EndpointGate`](@ref). `op_rtol`
-sets the relative threshold for factoring a matrix and defaults to a
-roundoff threshold. `op_rtol=0` retains every positive singular value.
-A `Diagonal` gate uses its phase table directly.
-
-`method=:swap` uses adjacent ordinary swaps and can truncate during routing.
-It takes a matrix and requires equal physical dimensions along the interval.
-Both backends accept the usual bond-dimension and truncation controls.
-With `return_stats=true`, report local truncation statistics in update order.
-`recanonicalize=true` runs `canonical!` after the full update, which may
-truncate outside the updated interval. Use `gauge=:auto` (or `:gram` or
-`:qr`) for fixed-bond-dimension restoration. Statistics describe the
-local update and exclude any later `canonical!` truncation.
+`method=:mpo` factors the matrix using the relative operator Schmidt cutoff
+`op_rtol`. `method=:swap` uses adjacent ordinary swaps, requires equal
+physical dimensions along the interval, and can truncate during routing.
+Both methods accept the usual state truncation and gauge options. With
+`return_stats=true`, report the local cuts in update order.
 """
-function apply_endpoint_gate!(ψ::DenseIMPS, G::Union{AbstractMatrix,EndpointGate}, i::Integer, j::Integer;
+function apply_endpoint_gate!(ψ::DenseIMPS, G::AbstractMatrix, i::Integer, j::Integer;
     method::Symbol=:mpo, op_rtol::Union{Nothing,Real}=nothing,
     maxdim::Integer=MAXDIM, mindim::Integer=1, truncerr::Real=0.0,
     svd_min::Union{Nothing,Real}=nothing, cutoff::Union{Nothing,Real}=nothing,
@@ -278,75 +331,37 @@ function apply_endpoint_gate!(ψ::DenseIMPS, G::Union{AbstractMatrix,EndpointGat
     inds = _endpoint_indices(ψ, i, j)
     i0, j0 = first(inds), last(inds)
     dl, dr = size(ψ.Γ[i0], 2), size(ψ.Γ[j0], 2)
-    if G isa EndpointGate
-        method === :mpo && isnothing(op_rtol) || throw(ArgumentError(
-            "an already prepared EndpointGate uses its existing MPO factors"))
-        _check_endpoint_dimensions(ψ, G, inds)
-        _check_gate_eltype(ψ, first(G.left))
-        _check_gate_eltype(ψ, first(G.right))
-    else
-        _check_gate_eltype(ψ, G)
-        _validate_endpoint_operator(G, dl, dr, op_rtol)
-    end
+    _check_gate_eltype(ψ, G)
+    _validate_endpoint_operator(G, dl, dr, op_rtol)
     controls = (; maxdim, mindim, truncerr, svd_min=svd_floor, renormalize, return_stats)
-    if G isa AbstractMatrix && length(inds) == 2 && dl == dr && isnothing(op_rtol) && !recanonicalize
+    if length(inds) == 2 && dl == dr && isnothing(op_rtol) && !recanonicalize
         return applygate!(ψ, G, i0, j0; controls..., gauge)
     end
-    # Multi-site kernels replace their arrays. A shallow copy of the
-    # containers lets us commit only after the full route has succeeded.
-    trial = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
     if method === :mpo
-        gate = G isa EndpointGate ? G : EndpointGate(_endpoint_factors(G, dl, dr, op_rtol)...)
-        stats = _endpoint_mpo!(trial, gate, inds; controls...)
-    else
-        all(k -> size(ψ.Γ[k], 2) == dl, inds) || throw(ArgumentError(
-            "the SWAP route requires equal physical dimensions along the interval"))
-        stats = BondStat[]
-        for k in length(inds)-1:-1:2
-            append!(stats, _endpoint_swap!(trial, inds[k], inds[k+1]; controls...))
-        end
-        result = applygate!(trial, G, inds[1], inds[2]; controls...)
-        return_stats && append!(stats, result[2].bond_stats)
-        for k in 2:length(inds)-1
-            append!(stats, _endpoint_swap!(trial, inds[k], inds[k+1]; controls...))
-        end
+        gate = EndpointGate(_endpoint_factors(G, dl, dr, op_rtol)...)
+        return _apply_factored_endpoint!(ψ, gate, inds, controls; recanonicalize, gauge)
     end
-    recanonicalize && canonical!(trial; maxdim, cutoff=svd_floor, renormalize)
-    isnothing(gauge) || restore_canonical!(trial; method=gauge)
-    ψ.Γ .= trial.Γ
-    ψ.λ .= trial.λ
-    return return_stats ? (ψ, _gate_update_stats(i0, j0, stats)) : ψ
+
+    all(k -> size(ψ.Γ[k], 2) == dl, inds) || throw(ArgumentError(
+        "the SWAP route requires equal physical dimensions along the interval"))
+    trial = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
+    stats = BondStat[]
+    for k in length(inds)-1:-1:2
+        append!(stats, _endpoint_swap!(trial, inds[k], inds[k+1]; controls...))
+    end
+    result = applygate!(trial, G, inds[1], inds[2]; controls...)
+    return_stats && append!(stats, result[2].bond_stats)
+    for k in 2:length(inds)-1
+        append!(stats, _endpoint_swap!(trial, inds[k], inds[k+1]; controls...))
+    end
+    return _finish_endpoint_update!(ψ, trial, inds, stats, controls; recanonicalize, gauge)
 end
 
-applygate!(ψ::DenseIMPS, gate::EndpointGate, i::Integer, j::Integer; kwargs...) =
-    apply_endpoint_gate!(ψ, gate, i, j; kwargs...)
-
-function applygate!(ψ::DenseIMPS, gate::ControlledGate, i::Integer, j::Integer;
-    maxdim::Integer=MAXDIM, mindim::Integer=1, truncerr::Real=0.0,
-    svd_min::Union{Nothing,Real}=nothing, cutoff::Union{Nothing,Real}=nothing,
-    renormalize::Bool=true, recanonicalize::Bool=false, gauge::Union{Nothing,Symbol}=nothing,
-    return_stats::Bool=false)
-    svd_floor = _resolve_svd_min(svd_min, cutoff)
-    _validate_truncation_args(maxdim, mindim, truncerr, svd_floor)
-    _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
-    inds = _endpoint_indices(ψ, i, j)
-    length(inds) == 3 || throw(ArgumentError("a ControlledGate requires a three-site interval"))
-    _check_endpoint_dimensions(ψ, gate.ends, inds)
-    d = size(ψ.Γ[inds[2]], 2)
-    size(gate.center_delta) == (d, d) ||
-        throw(DimensionMismatch("central gate dimension must match the central site"))
-    _check_gate_eltype(ψ, gate.center_delta)
-
-    trial = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
-    stats = _endpoint_mpo!(trial, gate.ends, inds; maxdim, mindim, truncerr,
-        svd_min=svd_floor, renormalize, return_stats, middle=gate.center_delta)
-    if recanonicalize && last(inds) < first(inds)
-        canonical!(trial; maxdim, cutoff=svd_floor, renormalize)
-    end
-    isnothing(gauge) || restore_canonical!(trial; method=gauge)
-    ψ.Γ .= trial.Γ
-    ψ.λ .= trial.λ
-    return return_stats ? (ψ, _gate_update_stats(first(inds), last(inds), stats)) : ψ
+function apply_endpoint_gate!(ψ::DenseIMPS, gate::EndpointGate, i::Integer, j::Integer;
+    method::Symbol=:mpo, op_rtol::Union{Nothing,Real}=nothing, kwargs...)
+    method === :mpo && isnothing(op_rtol) || throw(ArgumentError(
+        "an already prepared EndpointGate uses its existing MPO factors"))
+    return applygate!(ψ, gate, i, j; kwargs...)
 end
 
 """
