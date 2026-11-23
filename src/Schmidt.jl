@@ -630,15 +630,18 @@ function _periodic_left_centers(B, seed, tol, maxiter, accelerate)
     error("periodic QR did not close the left seam after $maxiter sweeps")
 end
 
-function _check_small_transfer_uniqueness(tensors)
+function _check_small_transfer_uniqueness(tensors;
+        message="gauge restoration found multiple peripheral transfer eigenvalues")
     χ = size(first(tensors), 1)
     1 < χ <= 4 || return nothing
     # A periodic sweep can close even when the transfer has more than one
-    # peripheral eigenvalue. Check the small seam without fusing the cell.
+    # peripheral eigenvalue. Compare with the leading modulus so the check
+    # also works on unnormalized tensor cells.
     E = _seam_transfer_matrix(tensors)
-    gap_floor = 100 * eps(real(eltype(E))) * χ^2
-    count(v -> abs(abs(v) - 1) <= gap_floor, eigvals(E)) <= 1 ||
-        throw(ArgumentError("gauge restoration found multiple peripheral transfer eigenvalues"))
+    radii = abs.(eigvals(E))
+    radius = maximum(radii)
+    gap_floor = 100 * eps(real(eltype(E))) * χ^2 * radius
+    count(r -> radius - r <= gap_floor, radii) == 1 || throw(ArgumentError(message))
     return nothing
 end
 

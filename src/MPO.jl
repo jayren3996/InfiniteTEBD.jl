@@ -848,22 +848,26 @@ function _truncate_canonical!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormali
     end
     sliced = any(b -> keep[b] < length(ψ.λ[b]), 1:ψ.n)
     if sliced
-        # In canonical form the bond basis is the Schmidt basis, so keeping the leading k_b
-        # values is a slice of the two tensors next to bond b.
+        # Each tensor sees the cuts of both adjacent bonds in the Schmidt basis.
         for b in 1:ψ.n
-            nb = mod1(b + 1, ψ.n)
-            k = keep[b]
-            ψ.λ[b] = ψ.λ[b][1:k]
-            ψ.Γ[b] = ψ.Γ[b][:, :, 1:k]
-            ψ.Γ[nb] = ψ.Γ[nb][1:k, :, :]
+            A = ψ.Γ[b]
+            left, right = keep[mod1(b - 1, ψ.n)], keep[b]
+            if left < size(A, 1) || right < size(A, 3)
+                ψ.Γ[b] = A[1:left, :, 1:right]
+            end
+            λ = ψ.λ[b]
+            if right < length(λ)
+                λ = λ[1:right]
+                !recanonicalize && renormalize && (λ ./= norm(λ))
+            elseif !recanonicalize && renormalize
+                scale = norm(λ)
+                isone(scale) || (λ = λ ./ scale)
+            end
+            ψ.λ[b] = λ
         end
         if recanonicalize
             # Restore the gauge on the retained bond support.
             _precise_canonical!(ψ; renormalize, reduce=false)
-        elseif renormalize
-            for b in 1:ψ.n
-                ψ.λ[b] ./= norm(ψ.λ[b])
-            end
         end
     end
     return stats, sliced
@@ -1048,7 +1052,6 @@ end
 # small finite weight is never mistaken for zero, for any cell length.
 function _annihilated(lognorm, ψ, W::iMPO)
     threshold = _annihilation_threshold(ψ, W)
-    lognorm >= threshold + 40 && return false           # far above: skip the norm of ψ
     # Sufficient bound without an eigensolve: ½ log ρ(E_self) ≤ Σᵢ log‖Bᵢ‖_F (each site's
     # Kraus map has norm ≤ ‖Bᵢ‖², and the spectral radius is submultiplicative). If the
     # norm of W·ψ relative to this upper bound already clears the screen, so does the
@@ -1082,12 +1085,12 @@ end
 # an unregauged truncated state (used inside `evolve!`, where the next application
 # canonicalizes anyway).
 function _apply_mpo!(ψ::iMPS, W::iMPO; maxdim, cutoff, truncerr, renormalize, recanonicalize,
-                     normalize_cells::Bool, structured::Bool=true)
+                     normalize_cells::Bool, structured::Bool=true, snapshot=nothing)
     _validate_mpo_truncation(maxdim, cutoff, truncerr)
     _check_mpo_state(ψ, W)
-    res = structured && _controlled_eligible(ψ, W, renormalize) ?
-        _apply_controlled(ψ, _valid_structure(W); maxdim, cutoff, truncerr, renormalize, recanonicalize) :
-        nothing
+    structure = structured ? _applicable_controlled_structure(ψ, W, renormalize) : nothing
+    res = isnothing(structure) ? nothing :
+        _apply_controlled(ψ, structure; maxdim, cutoff, truncerr, renormalize, recanonicalize)
     if isnothing(res)
         path = :generic
         trial = _contract_mpo(ψ, W)
@@ -1096,6 +1099,17 @@ function _apply_mpo!(ψ::iMPS, W::iMPO; maxdim, cutoff, truncerr, renormalize, r
     else
         path = :controlled
         trial, stats, lognorm, sliced = res
+    end
+    # At an observed unmerged boundary, the sample and main trajectory
+    # share the same cut. Finish the sample's gauge before committing either.
+    if !isnothing(snapshot)
+        if sliced
+            snapshot.Γ .= trial.Γ
+            snapshot.λ .= trial.λ
+            _precise_canonical!(snapshot; renormalize, reduce=false)
+        else
+            _copy_imps_state!(snapshot, trial)
+        end
     end
     _annihilated(lognorm, ψ, W) && throw(MPOAnnihilationError(
         "the MPO maps the state to zero (norm per cell at the roundoff level)"))
@@ -1113,8 +1127,7 @@ end
 #---------------------------------------------------------------------------------------------------
 # Trotterized MPO evolution
 #---------------------------------------------------------------------------------------------------
-_layer_exp(h::Diagonal, scale) = Diagonal(exp.(scale .* h.diag))
-_layer_exp(h::AbstractMatrix, scale) = exp(scale * Matrix(h))
+_layer_exp(h::AbstractMatrix, scale) = _trotter_gate_exp(h isa Diagonal ? h : Matrix(h), scale)
 
 """
     trotter_mpos(layers, dt; trotter=:second, evolution=:real, n, cutoff=1e-14, check=true, gate_map=identity)
@@ -1163,11 +1176,20 @@ function trotter_mpos(layers, dt::Real; trotter::Symbol=:second, evolution::Symb
     end
     stages = _trotter_stage_schedule(length(layers), trotter, 1)
     cache = Dict{Tuple{Int,Float64},iMPO}()
+    # A custom gate_map may mutate the supplied gate or captured terms.
+    # Keep its individual calls and fresh exponentials.
+    exponentials = IdDict{Any,Dict{Float64,AbstractMatrix}}()
+    stage_gate(h, coeff, scale) = if gate_map === identity
+        by_coefficient = get!(() -> Dict{Float64,AbstractMatrix}(), exponentials, h)
+        get!(() -> _layer_exp(h, scale), by_coefficient, Float64(coeff))
+    else
+        gate_map(_layer_exp(h, scale))
+    end
     mpos = iMPO[]
     for (k, coeff) in stages
         W = get!(cache, (k, Float64(coeff))) do
             scale = _trotter_time_prefactor(dt, coeff, evolution)
-            gates = [(gate_map(_layer_exp(h, scale)), i, j) for (h, i, j) in layers[k]]
+            gates = [(stage_gate(h, coeff, scale), i, j) for (h, i, j) in layers[k]]
             layer_mpo(gates, n; cutoff, check=check && gate_map !== identity, d)
         end
         push!(mpos, W)
@@ -1189,7 +1211,7 @@ function _merged_boundary(last_mpo::iMPO, first_mpo::iMPO)
 end
 
 """
-    evolve!(ψ, mpos::Vector{<:iMPO}, steps; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, merge=true, return_stats=false, structured=true, observe=nothing, every=1)
+    evolve!(ψ, mpos::AbstractVector{<:iMPO}, steps; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, merge=true, return_stats=false, structured=true, observe=nothing, every=1)
 
 Apply the MPO sequence `mpos` (one Trotter step, e.g. from
 [`trotter_mpos`](@ref)) `steps` times with [`apply!`](@ref), truncating after
@@ -1212,23 +1234,27 @@ application and one truncation per step. Because of it, `steps` calls of
 Observation: `observe(φ, k, stats)` is called with `k = 0` (the input state as
 given, `stats = nothing`), after every `every` complete Trotter steps, and after
 the last step (also when `steps` is not a multiple of `every`). `φ` is the
-canonical, normalized state at time `k·dt`: exactly the state that
-`evolve!(copy, mpos, k)` would return from the same input, also at a merged
+state at time `k·dt` returned by the corresponding prefix evolution
+with the same options. This also holds at a merged
 boundary, where the pending half step is applied to a **snapshot** with the
 final-application settings; the main trajectory, its truncations and the
 returned `ψ` are the same as without `observe`. For `0 < k < steps`, `φ` is a
 private snapshot the observer may keep; at `k = 0` and `k = steps` it is `ψ`
 itself — copy it (`deepcopy`) to keep it. The observer must not modify `φ`.
-`stats` aggregates the main-line applications since the previous sample plus,
-for an intermediate sample, the application that completed the snapshot; its
-fields are those of `return_stats` plus `num_at_cap`. Observation is off by
-default and does not change the return value.
+`stats` aggregates the main-line applications since the previous sample.
+When half steps are merged, an intermediate interval also counts the
+application that completed the snapshot. At an unmerged boundary, the
+ordinary ending application is counted once. With `return_stats=:summary`,
+the observer receives scalar totals. With `false` or `true`, the observer
+also receives `updates` for the latest interval.
 
-Returns `ψ`, or `(ψ, stats)` with `return_stats=true`: `updates` (the stats
-of each [`apply!`](@ref)), `max_discarded_weight`, `mean_discarded_weight`,
-`max_kept_dim`, `num_saturated` (bonds where the requested dimension exceeded
-`maxdim`), `num_at_cap` (bonds whose retained dimension equals `maxdim`), and
-`num_structured`, the number of applications that used the structured update.
+Returns `ψ`, or `(ψ, stats)` with `return_stats=:summary` or `true`. The latter
+also retains `updates` (the stats of each [`apply!`](@ref)). The full-run
+statistics cover only the main trajectory and include `sum_discarded_weight`,
+`max_discarded_weight`, `mean_discarded_weight`, `max_kept_dim`, `num_bond_updates`,
+`num_saturated` (requests exceeding `maxdim`), `num_at_cap` (dimensions
+retained at `maxdim`), `num_target_unmet` and `num_structured`, the number of
+applications that used the structured update.
 `structured=true` allows it (see [`apply!`](@ref)).
 
 Example:
@@ -1242,11 +1268,10 @@ evolve!(psi, U, 20; maxdim=16)
 """
 function evolve!(ψ::iMPS, mpos::AbstractVector{<:iMPO}, steps::Integer;
                  maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL, truncerr::Real=0.0,
-                 renormalize::Bool=true, merge::Bool=true, return_stats::Bool=false,
+                 renormalize::Bool=true, merge::Bool=true, return_stats::Union{Bool,Symbol}=false,
                  structured::Bool=true, observe=nothing, every::Integer=1)
     steps >= 0 || throw(ArgumentError("steps must be non-negative"))
     _validate_mpo_truncation(maxdim, cutoff, truncerr)
-    every >= 1 || throw(ArgumentError("every must be positive"))
     foreach(W -> _check_mpo_state(ψ, W), mpos)
     k = length(mpos)
     merged = merge && k >= 2 && steps >= 2 ? _merged_boundary(mpos[end], mpos[1]) : nothing
@@ -1257,64 +1282,58 @@ end
 # `merged`: precomputed boundary MPO (or nothing for no merging); see `evolve!`.
 function _evolve_sequence!(ψ, mpos, merged, steps; maxdim, cutoff, truncerr, renormalize,
                            return_stats, structured, observe=nothing, every=1)
+    stats, interval = _evolution_recorders(return_stats, observe, every; detailed_observation=true)
     isnothing(observe) || observe(ψ, 0, nothing)
     if isempty(mpos)
-        return return_stats ? (ψ, _aggregate_mpo_stats(Any[]; maxdim)) : ψ
+        if !isnothing(observe)
+            for s in 1:steps
+                if s % every == 0 || s == steps
+                    sample = s == steps ? ψ : deepcopy(ψ)
+                    interval = _sample_evolution(observe, sample, s, interval; mpo=true)
+                end
+            end
+        end
+        return isnothing(stats) ? ψ : (ψ, _evolution_report(stats, true))
     end
     k = length(mpos)
-    record = return_stats || !isnothing(observe)
-    updates = record ? Any[] : nothing
-    since = 0                                    # first update index of the current interval
-    apply_one!(state, W, last) = begin
+    detail = return_stats === true || (return_stats === false && !isnothing(observe))
+    apply_one!(state, W, last, total, interval; snapshot=nothing) = begin
         # Intermediate truncations are only renormalized: the next application
         # recanonicalizes anyway. The final state is returned in canonical form.
         st, path = _apply_mpo!(state, W; maxdim, cutoff, truncerr, renormalize, recanonicalize=last,
-                               normalize_cells=false, structured)
-        return record ? _truncation_summary(st; path) : nothing
+                               normalize_cells=false, structured, snapshot)
+        if !isnothing(total) || !isnothing(interval)
+            update = detail ? _truncation_summary(st; path) : nothing
+            _record_evolution!(total, st, maxdim, update, path === :controlled)
+            _record_evolution!(interval, st, maxdim, update, path === :controlled)
+        end
+        return nothing
     end
     for s in 1:steps
         body = isnothing(merged) || s == 1 ? view(mpos, 1:k-1) :
                Iterators.flatten(((merged,), view(mpos, 2:k-1)))
         for W in body
-            u = apply_one!(ψ, W, false)
-            record && push!(updates, u)
+            apply_one!(ψ, W, false, stats, interval)
         end
         last_step = s == steps
         due = !isnothing(observe) && (s % every == 0 || last_step)
+        sample = ψ
         if due && !last_step
-            # Snapshot at time s·dt: the pending last layer, applied as a final application.
-            snap = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
-            u = apply_one!(snap, mpos[end], true)
-            observe(snap, s, _aggregate_mpo_stats(vcat(updates[since+1:end], [u]); maxdim))
-            since = length(updates)
+            # Complete an isolated sample at time s·dt.
+            sample = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
+            if isnothing(merged)
+                apply_one!(ψ, mpos[end], false, stats, interval; snapshot=sample)
+            else
+                apply_one!(sample, mpos[end], true, nothing, interval)
+            end
+        elseif isnothing(merged) || last_step
+            apply_one!(ψ, mpos[end], last_step, stats, interval)
         end
-        if isnothing(merged) || last_step
-            u = apply_one!(ψ, mpos[end], last_step)
-            record && push!(updates, u)
-        end
-        if due && last_step
-            observe(ψ, s, _aggregate_mpo_stats(updates[since+1:end]; maxdim))
-            since = length(updates)
+        if due
+            interval = _sample_evolution(observe, sample, s, interval; mpo=true)
         end
     end
-    return return_stats ? (ψ, _aggregate_mpo_stats(updates; maxdim)) : ψ
-end
-
-function _aggregate_mpo_stats(updates; maxdim=nothing)
-    all_stats = BondStat[]
-    for u in updates
-        append!(all_stats, u.bond_stats)
-    end
-    w = [s.discarded_weight for s in all_stats]
-    return (
-        updates=updates,
-        max_discarded_weight=isempty(w) ? 0.0 : maximum(w),
-        mean_discarded_weight=isempty(w) ? 0.0 : sum(w) / length(w),
-        max_kept_dim=isempty(all_stats) ? 0 : maximum(s.chi_keep for s in all_stats),
-        num_saturated=count(s -> s.saturated, all_stats),
-        num_at_cap=isnothing(maxdim) ? 0 : count(s -> s.chi_keep >= maxdim, all_stats),
-        num_structured=count(u -> u.path === :controlled, updates),
-    )
+    return isnothing(stats) ? ψ : (ψ, _evolution_report(stats, true))
 end
 
 #---------------------------------------------------------------------------------------------------
@@ -1412,22 +1431,26 @@ struct _ImagPrep
     spectra::IdDict{Any,Tuple{Float64,Float64}}
 end
 
-function _prepare_imaginary(terms_or_layers; n::Integer, d::Integer)
+function _prepare_imaginary(terms_or_layers; n::Integer, d::Integer, validate_only::Bool=false)
     layers, terms = _layers_and_terms(terms_or_layers, n, d)
-    spectra = IdDict{Any,Tuple{Float64,Float64}}()
     for (h, i, j) in terms
         _support_span(h, i, j, n, d)
         ishermitian(h) || throw(ArgumentError("energy_fix! requires Hermitian terms"))
-        get!(spectra, h) do
-            v = eigvals(Hermitian(Matrix(h)))
-            (Float64(first(v)), Float64(last(v)))
-        end
+        all(isfinite, h) || throw(ArgumentError("energy_fix! requires finite terms"))
     end
     for layer in layers
         _bond_crossings_ok(layer, n, d) || throw(ArgumentError(
             "a layer has two gates (or two translates of one gate) crossing the same bond of " *
             "the $n-site cell; split it into separate layers"))
         check_commuting(layer; n, d)
+    end
+    validate_only && return nothing
+    spectra = IdDict{Any,Tuple{Float64,Float64}}()
+    for (h, _, _) in terms
+        get!(spectra, h) do
+            v = eigvals(Hermitian(Matrix(h)))
+            (Float64(first(v)), Float64(last(v)))
+        end
     end
     return _ImagPrep(layers, terms, Int(n), Int(d), spectra)
 end
@@ -1445,8 +1468,9 @@ function _validate_energy_fix_args(ψ, χ, prep::_ImagPrep; target, tol, alpha, 
 end
 
 function _imaginary_trial_mpos(prep::_ImagPrep, dτ)
-    shifted = [[(h - (dτ > 0 ? prep.spectra[h][1] : prep.spectra[h][2]) * I, i, j) for (h, i, j) in layer]
-               for layer in prep.layers]
+    # Preserve term identity across translates so the exponentials can be shared.
+    shifted_term = IdDict(h => h - bounds[dτ > 0 ? 1 : 2] * I for (h, bounds) in prep.spectra)
+    shifted = [[(shifted_term[h], i, j) for (h, i, j) in layer] for layer in prep.layers]
     return trotter_mpos(shifted, dτ; evolution=:imaginary, n=prep.n, check=false, d=prep.d)
 end
 
@@ -1519,14 +1543,18 @@ end
 # Per-site fidelity
 #---------------------------------------------------------------------------------------------------
 """
-    per_site_fidelity(ψ1, ψ2)
+    per_site_fidelity(ψ1, ψ2; normalize=false, kwargs...)
 
 `|⟨ψ1|ψ2⟩|^(1/n)` per site for two normalized iMPS with the same cell length
 `n`, from the dominant eigenvalue of the mixed cell transfer matrix.
+Pass `normalize=true` to account for the two self-transfer radii of dense
+states, with the options of [`log_per_site_fidelity`](@ref). Square the result
+for the squared fidelity per site.
 """
-function per_site_fidelity(ψ1::iMPS, ψ2::iMPS)
+function per_site_fidelity(ψ1::iMPS, ψ2::iMPS; normalize::Bool=false, kwargs...)
+    normalize && return exp(log_per_site_fidelity(ψ1, ψ2; kwargs...))
     ψ1.n == ψ2.n || throw(ArgumentError("per_site_fidelity needs equal cell lengths"))
-    return inner_product(ψ1, ψ2; tol=1e-14)^(1 / ψ1.n)
+    return inner_product(ψ1, ψ2; tol=1e-14, kwargs...)^(1 / ψ1.n)
 end
 export per_site_fidelity
 
@@ -1564,15 +1592,18 @@ export release_recorder
 """
     observe, record = release_recorder(ψ0; dt, site_ops=(;), fidelity=true)
 
-An observer for the MPO [`evolve!`](@ref) of a release from `ψ0`, and the
-record it fills (a named tuple of vectors, one entry per sample):
+This helper returns an observer for [`evolve!`](@ref) and a named tuple of
+vectors with one entry per sample. Use dense, canonical states for `ψ0` and
+the sampled local expectations and Schmidt entropies.
 
 - `step`, `t = step · dt` (physical time of the sampled state);
 - `entropy[k][b]`: entanglement entropy of bond `b` (`ent_S`, natural log);
 - `dims[k][b]`: retained bond dimension (`length(λ[b])`);
-- `max_discarded`, `num_saturated` (requested dimension exceeded `maxdim`),
-  `num_at_cap` (retained dimension equal to `maxdim`), `max_kept_dim`: over the
-  applications since the previous sample (zero at `t = 0`);
+- `sum_discarded`, `max_discarded`, `num_saturated` (requested dimension exceeded
+  `maxdim`), `num_at_cap` (retained dimension equal to `maxdim`), and
+  `num_target_unmet`: over the applications since the previous sample (zero at
+  `t = 0`). `max_kept_dim` gives the largest retained bond over the interval
+  or the initial largest bond at `t = 0`;
 - `ops[name][k][j]`: `⟨O⟩` on site `j` of the cell for each `name => O` in
   `site_ops` (e.g. `(; n = [0 0; 0 1])` gives `n_A`, `n_B` on a two-site cell);
 - `return_fidelity[k]`: `per_site_fidelity(ψ0, ψ(t))` (amplitude per site; the
@@ -1592,7 +1623,8 @@ function release_recorder(ψ0::iMPS; dt::Real, site_ops=(;), fidelity::Bool=true
     ref = deepcopy(ψ0)
     names = collect(keys(site_ops))
     record = (step=Int[], t=Float64[], entropy=Vector{Float64}[], dims=Vector{Int}[],
-              max_discarded=Float64[], num_saturated=Int[], num_at_cap=Int[], max_kept_dim=Int[],
+              sum_discarded=Float64[], max_discarded=Float64[], num_saturated=Int[],
+              num_at_cap=Int[], max_kept_dim=Int[], num_target_unmet=Int[],
               ops=Dict{Symbol,Vector{Vector{Float64}}}(k => Vector{Float64}[] for k in names),
               return_fidelity=Float64[])
     observe = function (φ, k, stats)
@@ -1600,10 +1632,12 @@ function release_recorder(ψ0::iMPS; dt::Real, site_ops=(;), fidelity::Bool=true
         push!(record.t, k * dt)
         push!(record.entropy, [ent_S(φ, b) for b in 1:φ.n])
         push!(record.dims, length.(φ.λ))
+        push!(record.sum_discarded, isnothing(stats) ? 0.0 : stats.sum_discarded_weight)
         push!(record.max_discarded, isnothing(stats) ? 0.0 : stats.max_discarded_weight)
         push!(record.num_saturated, isnothing(stats) ? 0 : stats.num_saturated)
         push!(record.num_at_cap, isnothing(stats) ? 0 : stats.num_at_cap)
         push!(record.max_kept_dim, isnothing(stats) ? maximum(length, φ.λ) : stats.max_kept_dim)
+        push!(record.num_target_unmet, isnothing(stats) ? 0 : stats.num_target_unmet)
         for name in names
             O = site_ops[name]
             push!(record.ops[name], [real(expect(φ, O, j, j)) for j in 1:φ.n])

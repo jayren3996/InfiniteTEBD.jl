@@ -282,9 +282,12 @@ function _projection_setup(ψ::iMPS, χ::Integer; cutoff, terms, target, tol, al
     ψ isa DenseIMPS || throw(ArgumentError("ScarFinder supports dense iMPS states"))
     _validate_mpo_truncation(χ, cutoff, 0.0)
     n > 0 || throw(ArgumentError("unit-cell length must be positive"))
-    prep = isnothing(terms) ? nothing : _prepare_imaginary(terms; n, d=size(ψ.Γ[1], 2))
-    isnothing(target) && return nothing
-    isnothing(prep) && throw(ArgumentError("supply `terms` (or a density `h`) when setting `target`"))
+    if isnothing(terms)
+        isnothing(target) && return nothing
+        throw(ArgumentError("supply `terms` (or a density `h`) when setting `target`"))
+    end
+    prep = _prepare_imaginary(terms; n, d=size(ψ.Γ[1], 2), validate_only=isnothing(target))
+    isnothing(prep) && return nothing
     _validate_energy_fix_args(ψ, χ, prep; target, tol, alpha, maxstep, cutoff)
     eltype(ψ) <: Real && throw(ArgumentError("energy correction needs a complex iMPS; use mps_promote_type"))
     return prep
@@ -331,26 +334,30 @@ function _isolated_transfer_fixed_point(ψ::DenseIMPS)
 end
 
 function _project!(ψ::DenseIMPS, χ::Integer, prep; cutoff, target, tol, alpha, maxstep,
-                   canonical_input::Bool=false)
+                   canonical_input::Bool=false, report::Bool=true)
     reuse = canonical_input && _well_separated_schmidt_cut(ψ, χ, cutoff) &&
             _isolated_transfer_fixed_point(ψ)
     trial, _, lognorm, sliced = _truncated_state(ψ; maxdim=χ, cutoff, truncerr=0.0,
                                                 renormalize=true, canonical_input=reuse)
-    lognorm_site = lognorm / ψ.n
-    reference = if abs(lognorm_site) <= _ORTH_TOL
-        ψ
+    loss = if report && !(reuse && !sliced)
+        lognorm_site = lognorm / ψ.n
+        reference = if abs(lognorm_site) <= _ORTH_TOL
+            ψ
+        else
+            # Reuse the input norm from canonicalization, distributing the scale
+            # over the cell so the mixed transfer does not underflow on long cells.
+            norm_site = exp(lognorm_site)
+            iMPS([A ./ norm_site for A in ψ.Γ], ψ.λ, ψ.n)
+        end
+        -log(min(per_site_fidelity(reference, trial), 1.0))
     else
-        # Reuse the input norm from canonicalization, distributing the scale
-        # over the cell so the mixed transfer does not underflow on long cells.
-        norm_site = exp(lognorm_site)
-        iMPS([A ./ norm_site for A in ψ.Γ], ψ.λ, ψ.n)
+        0.0
     end
-    loss = reuse && !sliced ? 0.0 : -log(min(per_site_fidelity(reference, trial), 1.0))
     ψ.Γ .= trial.Γ
     ψ.λ .= trial.λ
-    isnothing(prep) && return (; loss, energy_error=nothing, converged=true)
+    isnothing(prep) && return report ? (; loss, energy_error=nothing, converged=true) : nothing
     r = _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff)
-    return (; loss, energy_error=r.residual, converged=r.converged)
+    return report ? (; loss, energy_error=r.residual, converged=r.converged) : nothing
 end
 
 """
@@ -359,6 +366,8 @@ end
 Project `ψ` onto the manifold of bond dimension `χ` at energy density `target`:
 [`truncate!`](@ref) every bond to `χ`, then, if `target` is given, correct the
 energy with [`energy_fix!`](@ref) using the terms `(h, i, j)` (period `n`).
+Supplied terms are validated before updating the state. Their spectral bounds
+are only prepared when `target` is supplied.
 
 Returns `(loss, energy_error, converged)`. `loss = −log F_site` compares the
 input and truncated states after accounting for their norms, before energy correction.
@@ -405,19 +414,34 @@ can differ from separate calls to `evolve!` and `project!`.
 scarfinder_step!(ψ::iMPS, U, χ::Integer; kwargs...) =
     _prepare_scarfinder_step(ψ, U, χ; kwargs...)(ψ)
 
-function _prepare_scarfinder_step(ψ::iMPS, U, χ::Integer; nstep::Integer=10, maxdim::Integer=MAXDIM,
+function _prepare_scarfinder_step(ψ::iMPS, U, χ::Integer, prepare_merge::Bool=false;
+                                  nstep::Integer=10, maxdim::Integer=MAXDIM,
                                   cutoff::Real=SVDTOL, terms=nothing,
                                   target::Union{Nothing,Real}=nothing, tol::Real=1e-6, alpha::Real=0.1,
                                   maxstep::Integer=50, n::Integer=_term_period(ψ, U))
     prep = _projection_setup(ψ, χ; cutoff, terms, target, tol, alpha, maxstep, n)
     _warn_scarfinder_nstep(nstep)
     evolution = _evolution(ψ, U)
-    return function (state)
-        evolve!(state, evolution, nstep; maxdim, cutoff)
-        # A plain MPO vector takes the built-in path, which ends with a
-        # normalized canonical state if it applied at least one layer.
-        canonical_input = evolution isa Vector{<:iMPO} && !isempty(evolution)
-        return _project!(state, χ, prep; cutoff, target, tol, alpha, maxstep, canonical_input)
+    # Only the built-in MPO method guarantees the final Schmidt gauge.
+    canonical_input = evolution isa Vector{<:iMPO} && !isempty(evolution) &&
+        which(evolve!, (typeof(ψ), typeof(evolution), typeof(nstep))) ===
+        which(evolve!, (iMPS, AbstractVector{<:iMPO}, Integer))
+    use_prepared = prepare_merge && canonical_input && nstep >= 2 && length(evolution) >= 2
+    merged = if use_prepared
+        _validate_mpo_truncation(maxdim, cutoff, 0.0)
+        foreach(W -> _check_mpo_state(ψ, W), evolution)
+        _merged_boundary(last(evolution), first(evolution))
+    else
+        nothing
+    end
+    return function (state, report::Bool=true)
+        if use_prepared
+            _evolve_sequence!(state, evolution, merged, nstep; maxdim, cutoff, truncerr=0.0,
+                              renormalize=true, return_stats=false, structured=true)
+        else
+            evolve!(state, evolution, nstep; maxdim, cutoff)
+        end
+        return _project!(state, χ, prep; cutoff, target, tol, alpha, maxstep, canonical_input, report)
     end
 end
 
@@ -450,21 +474,22 @@ function scarfinder!(ψ::iMPS, U, χ::Integer, N::Integer; refine::Bool=true,
     N >= 0 || throw(ArgumentError("N must be nonnegative"))
     (!refine || refine_step >= 0) || throw(ArgumentError("refine_step must be nonnegative"))
     isnothing(observe) || observe(ψ, 0, nothing)
+    report = !isnothing(history) || !isnothing(observe)
     # An observer can update the Hamiltonian or gate list between iterations.
     step! = if N > 0 && isnothing(observe)
-        _prepare_scarfinder_step(ψ, U, χ; kwargs...)
+        _prepare_scarfinder_step(ψ, U, χ, isnothing(history); kwargs...)
     else
-        state -> scarfinder_step!(state, U, χ; kwargs...)
+        nothing
     end
     for k in 1:N
-        r = step!(ψ)
+        r = isnothing(step!) ? scarfinder_step!(ψ, U, χ; kwargs...) : step!(ψ, report)
         isnothing(history) || push!(history, r)
         isnothing(observe) || observe(ψ, k, r)
     end
     if refine && refine_step > 0
-        refine_step! = N > 0 && isnothing(observe) && refine_U === U ? step! :
-                       _prepare_scarfinder_step(ψ, refine_U, χ; kwargs...)
-        minimize_on_trajectory!(_refinement_objective, refine_step!, ψ, refine_step)
+        refine_step! = !isnothing(step!) && !report && refine_U === U ? step! :
+                       _prepare_scarfinder_step(ψ, refine_U, χ, true; kwargs...)
+        minimize_on_trajectory!(_refinement_objective, state -> refine_step!(state, false), ψ, refine_step)
     end
     return ψ
 end

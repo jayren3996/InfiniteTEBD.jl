@@ -7,6 +7,37 @@ if !isdefined(Main, :TestUtils)
 end
 using .TestUtils: deterministic_tensor
 
+@testset "MIXED_LOGOVERLAP" begin
+    using Random: MersenneTwister
+    rng = MersenneTwister(17)
+    for T in (Float64, ComplexF64)
+        bra = [randn(rng, T, 2, 2, 3), randn(rng, T, 3, 2, 2)]
+        ket = [copy(A) + 0.03 * randn(rng, T, size(A)) for A in bra]
+        tangent = [randn(rng, T, size(A)) for A in bra]
+        objective(t) = log(inner_product(bra .+ t .* tangent, ket))
+        fit = mixed_logoverlap(bra, ket; derivatives=j -> (tangent[j], bra[j]))
+        value = mixed_logoverlap(bra, ket)
+        @test fit.logabs ≈ objective(0)
+        @test fit.logabs ≈ value.logabs
+        @test fit.gap_ratio ≈ value.gap_ratio
+        @test isnothing(value.gradient)
+        @test sum(first, fit.gradient) ≈ (objective(1e-6) - objective(-1e-6)) / 2e-6 atol=1e-8
+        @test last.(fit.gradient) ≈ [1.0, 1.0]
+    end
+
+    # The conjugate pair is tied in modulus, so no gradient is defined.
+    bra = [reshape(Matrix{Float64}(I, 2, 2), 2, 1, 2)]
+    ket = [reshape([0.0 -1.0; 1.0 0.0], 2, 1, 2)]
+    fit = mixed_logoverlap(bra, ket; derivatives=j -> (bra[j],))
+    @test fit.logabs ≈ 0.0 atol=1e-14
+    @test fit.gap_ratio ≈ 1.0
+    @test isnothing(fit.gradient)
+    zero_overlap = mixed_logoverlap(zero.(bra), ket; derivatives=j -> (bra[j],))
+    @test zero_overlap.logabs == -Inf
+    @test isnothing(zero_overlap.gradient)
+    @test_throws DimensionMismatch mixed_logoverlap(bra, [ket; ket])
+end
+
 @testset "TENSOR_DIAGONAL_MULTIPLICATION" begin
     Γ = reshape(ComplexF64.(1:12), 2, 3, 2)
 

@@ -9,13 +9,44 @@ using Random
 
 # Explicit imports from TensorKit to avoid name conflicts with ITensors
 # (both are test dependencies and share some exported names like `dim`, `space`).
-using TensorKit: U1Irrep, Z2Irrep, ZNIrrep, Vect, dim, block, blocks, space, id,
+using TensorKit: U1Irrep, Z2Irrep, ZNIrrep, SU2Irrep, Vect, dim, block, blocks, space, id,
                  ComplexSpace, sectortype, sectors, domain, codomain,
-                 AbstractTensorMap, DiagonalTensorMap, left_orth, ←, ⊗, @tensor
+                 AbstractTensorMap, DiagonalTensorMap, left_orth, ←, ⊗, @tensor,
+                 numout, permute, svd_trunc!, truncrank, trunctol
 
 # Symbol-table reach into the loaded extension for internal helpers.
 const _TKExt = Base.get_extension(InfiniteTEBD, :InfiniteTEBDTensorKitExt)
 schmidt_values_from_S(S::DiagonalTensorMap) = _TKExt._flatten_diagonal_blocks(S)
+
+@testset "observing a non-Abelian fixed-cap gate list" begin
+    P = Vect[SU2Irrep](0=>1)
+    V = Vect[SU2Irrep](0=>1, 1//2=>1)
+    rng = MersenneTwister(6019)
+    ψ = iMPS([randn(rng, ComplexF64, V ⊗ P ← V) for _ in 1:2],
+            [DiagonalTensorMap(ones(2), V) for _ in 1:2], 2)
+    gates = [(id(P ⊗ P), 1, 2)]
+    reference = evolve!(deepcopy(ψ), gates, 3)
+    calls = Int[]
+    function observe(_, k, stats)
+        @test isnothing(stats)
+        push!(calls, k)
+    end
+    before = deepcopy(ψ)
+    @test_throws ArgumentError evolve!(ψ, gates, 3; return_stats=:summary, observe)
+    @test_throws ArgumentError evolve!(ψ, gates, 3; return_stats=true)
+    @test isempty(calls)
+    @test ψ.Γ == before.Γ && ψ.λ == before.λ
+    @test evolve!(ψ, gates, 3; observe, every=2) === ψ
+    @test calls == [0, 2, 3]
+    @test ψ.Γ == reference.Γ && ψ.λ == reference.λ
+end
+
+@testset "symmetric adaptive rank uses the shared stable reduction" begin
+    V = graded_space(:U1, 0=>1, 1=>1)
+    λ = DiagonalTensorMap([0.6, 0.8], V)
+    @test adaptive_bonddim(1, λ; q=1e6, alpha=0, maxdim=32) == 2
+    @test adaptive_bonddim(1, λ; q=1, alpha=1e100, maxdim=32) == 32
+end
 
 @testset "experimental graded QR cut uses a global rank cap" begin
     Random.seed!(6018)
@@ -83,6 +114,37 @@ end
     @test rank_one.Γ == before.Γ && rank_one.λ == before.λ
 end
 
+# Form the whole physical block before the first SVD. This small-cell oracle
+# exercises different contractions from the sitewise streaming split.
+function grouped_split_reference!(ψ, Λwrap; maxdim, cutoff, renormalize)
+    T = ψ.Γ[1]
+    for G in ψ.Γ[2:end]
+        M = T * permute(G, ((1,), (2, 3)))
+        k = numout(M)
+        T = permute(M, (ntuple(identity, k + 1), (k + 2,)))
+    end
+    trunc = truncrank(Int(maxdim)) & trunctol(; atol=Float64(cutoff))
+    Λ = Λwrap
+    for i in 1:(ψ.n - 1)
+        k = numout(T)
+        grouped = permute(T, ((1, 2), ntuple(j -> j + 2, k - 1)))
+        U, S, Vt, _ = svd_trunc!(grouped; trunc)
+        if renormalize
+            bond_norm = norm(S)
+            iszero(bond_norm) || (S = S / bond_norm)
+        end
+        ψ.Γ[i] = _TKExt._absorb_diag_left(U, _TKExt._diag_inverse(Λ; cutoff)) * S
+        ψ.λ[i] = S
+        if i < ψ.n - 1
+            T = permute(S * Vt, (ntuple(identity, k - 1), (k,)))
+            Λ = S
+        else
+            ψ.Γ[end] = permute(Vt, ((1, 2), (3,)))
+        end
+    end
+    return ψ
+end
+
 @testset "streaming symmetric split matches the grouped reference" begin
     Random.seed!(6051)
     dense_tensors(ψ) = [convert(Array, A) for A in ψ.Γ]
@@ -105,7 +167,7 @@ end
                 ψ.Γ[1] = _TKExt._absorb_diag_left(ψ.Γ[1], ψ.λ[end])
             end
             _TKExt._split_unit_cell!(a, a.λ[end]; caps...)
-            _TKExt._split_unit_cell_grouped!(b, b.λ[end]; caps...)
+            grouped_split_reference!(b, b.λ[end]; caps...)
             @test domain.(a.λ) == domain.(b.λ)
             for i in eachindex(a.λ), (sector, values) in blocks(a.λ[i])
                 @test diag(values) ≈ diag(block(b.λ[i], sector)) atol=1e-10

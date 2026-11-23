@@ -14,6 +14,7 @@ import InfiniteTEBD: iMPS, _validate_iMPS_bonds, _bond_dim
 import InfiniteTEBD: canonical!, restore_canonical!
 import InfiniteTEBD: _resolve_svd_min, _validate_truncation_args, adaptive_bonddim
 import InfiniteTEBD: BondStat, _discarded_weight_choice, _gate_update_stats, _validate_gauge_checkpoint
+import InfiniteTEBD: _supports_gate_statistics
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Chunk 3: Helper layer
@@ -81,6 +82,9 @@ graded_space(sym::Symbol, args...) = graded_space(Val(sym), args...)
 # `Base.get_extension(InfiniteTEBD, :InfiniteTEBDTensorKitExt).SymmetricIMPS` from user code,
 # and unqualified as `SymmetricIMPS` inside the extension's own methods.
 const SymmetricIMPS = iMPS{<:AbstractTensorMap, <:DiagonalTensorMap}
+
+_supports_gate_statistics(ψ::SymmetricIMPS) =
+    TensorKit.FusionStyle(sectortype(first(ψ.Γ))) isa TensorKit.UniqueFusion
 
 """
     spin_half_ops(symmetry::Symbol)
@@ -170,18 +174,13 @@ function _flatten_diagonal_blocks(λ::DiagonalTensorMap)
     return out
 end
 
-# Adaptive bond-dim policy used by `_evolve_gate_sequence!` with
-# `chi_policy=:adaptive`. The dense routine takes `λ::AbstractVector`; for the
-# symmetric backend we flatten per-sector blocks and delegate so the user gets
-# the same intrinsic-rank estimate without having to extract the spectrum
-# themselves. Without this method the call site raised `MethodError` on the
-# `DiagonalTensorMap`.
 function adaptive_bonddim(
     previous::Integer,
     λ::DiagonalTensorMap;
     kwargs...
 )
-    return adaptive_bonddim(previous, _flatten_diagonal_blocks(λ); kwargs...)
+    spectrum = (Float64(real(v)) for (_, blk) in blocks(λ) for v in blk.diag)
+    return InfiniteTEBD._adaptive_bonddim(previous, spectrum; kwargs...)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1008,40 +1007,23 @@ function _negative_spectral_weight(M::AbstractTensorMap)
     return w
 end
 
-# Block-wise positive square root of a Hermitian, positive-semidefinite
-# TensorMap. The block algebra preserves U(1) sector structure trivially since
-# every block is processed independently.
-function _block_sqrt(M::AbstractTensorMap)
-    out = similar(M)
+# Principal block roots and, when needed, their cutoff-aware pseudo-inverses.
+function _block_roots(M::AbstractTensorMap; invert::Bool=false, cutoff::Real=InfiniteTEBD.SVDTOL)
+    root = similar(M)
+    inverse = invert ? similar(M) : nothing
     for (sector, blk) in blocks(M)
-        H = (Matrix(blk) + Matrix(blk)') / 2
-        F = eigen(Hermitian(H))
-        # Clamp tiny negatives from numerical noise to avoid complex sqrt.
-        evs = max.(real.(F.values), 0)
-        sq = F.vectors * Diagonal(sqrt.(evs)) * F.vectors'
-        copyto!(block(out, sector), sq)
+        H = Matrix(blk)
+        F = eigen(Hermitian((H + H') / 2))
+        scales = sqrt.(max.(F.values, 0))
+        copyto!(block(root, sector), F.vectors * Diagonal(scales) * F.vectors')
+        if invert
+            scale = maximum(abs, F.values; init=0.0)
+            tol = max(Float64(cutoff), eps(Float64)) * max(scale, 1.0)
+            invs = [v > tol ? inv(s) : 0.0 for (v, s) in zip(F.values, scales)]
+            copyto!(block(inverse, sector), F.vectors * Diagonal(invs) * F.vectors')
+        end
     end
-    return out
-end
-
-# Block-wise pseudo-inverse square root: M^{-1/2}, zeroing eigenvalues below a
-# per-block tolerance. The tolerance threshold is `cutoff * max(|eigenvalues|)`
-# so that the user-supplied truncation cutoff is respected.
-function _block_isqrt(M::AbstractTensorMap; cutoff::Real=InfiniteTEBD.SVDTOL)
-    out = similar(M)
-    for (sector, blk) in blocks(M)
-        H = (Matrix(blk) + Matrix(blk)') / 2
-        F = eigen(Hermitian(H))
-        evs = real.(F.values)
-        scale = isempty(evs) ? 0.0 : maximum(abs, evs)
-        # Safety floor at eps(Float64) prevents inverting eigenvalues that are
-        # pure numerical noise (which would give inv(sqrt(noise)) ≈ ∞).
-        tol = max(Float64(cutoff), eps(Float64)) * max(scale, 1.0)
-        invs = [v > tol ? inv(sqrt(v)) : 0.0 for v in evs]
-        isq = F.vectors * Diagonal(invs) * F.vectors'
-        copyto!(block(out, sector), isq)
-    end
-    return out
+    return root, inverse
 end
 
 """
@@ -1136,9 +1118,8 @@ function canonical!(ψ::iMPS{<:AbstractTensorMap, <:DiagonalTensorMap};
     end
 
     # 2. Principal square roots (Hermitian, block-positive).
-    X    = _block_sqrt(R)
-    Xinv = _block_isqrt(R; cutoff=cutoff)
-    Y    = _block_sqrt(L)
+    X, Xinv = _block_roots(R; invert=true, cutoff)
+    Y, _ = _block_roots(L)
 
     # 3. SVD of M = X · Y. The new Schmidt values on the wraparound bond are
     # the singular values; the gauge `G = X · U` rotates into the canonical
@@ -1226,7 +1207,7 @@ function _split_unit_cell!(ψ::SymmetricIMPS, Λwrap::DiagonalTensorMap;
         nrm = norm(S)
         isfinite(nrm) && nrm > 0 || throw(ArgumentError("no finite nonzero Schmidt weight remains on bond $i"))
         renormalize && (S = S / nrm)
-        ψ.Γ[i] = _absorb_diag_right(_absorb_diag_left(A, _diag_inverse(λ; cutoff)), S)
+        ψ.Γ[i] = _absorb_diag_left(A, _diag_inverse(λ; cutoff)) * S
         ψ.λ[i] = S
         tail = Vt * tails[i+1]
         if i == n - 1
@@ -1239,120 +1220,11 @@ function _split_unit_cell!(ψ::SymmetricIMPS, Λwrap::DiagonalTensorMap;
     return ψ
 end
 
-# Split a multi-site unit cell back into individually right-canonical site
-# tensors. After the wraparound gauge, the grouped tensor
-# `T = B_1 · B_2 · ... · B_n` is right-canonical as a whole (Σ_phys T·T' = I).
-#
-# The algorithm mirrors the dense `tensor_decomp!` (left-to-right SVD sweep):
-# at each step the leftmost site is split off; the new Schmidt is absorbed on
-# its right (to maintain `B_i = Γ_i · λ_i` storage convention) and on the LEFT
-# of the remaining tensor (so the next iteration sees a "left-Schmidt-absorbed"
-# tensor analogous to the wraparound starting state). The final remaining
-# tensor is the rightmost site's stored B (it is already right-canonical as an
-# SVD isometry).
-# Small-cell reference used by the streaming-split regression tests.
-function _split_unit_cell_grouped!(ψ::SymmetricIMPS, Λwrap::DiagonalTensorMap;
-                                   maxdim::Integer, cutoff::Real, renormalize::Bool)
-    n = ψ.n
-    n > 1 || return ψ
-
-    # Build the full grouped tensor T = B_1 · B_2 · ... · B_n.
-    T = ψ.Γ[1]
-    for i in 2:n
-        T = _contract_right(T, ψ.Γ[i])
-    end
-    # T has codomain (V_left, P_1, ..., P_n), domain V_right.
-
-    truncstrat = truncrank(Int(maxdim)) & trunctol(; atol=Float64(cutoff))
-    λi = Λwrap            # previous Schmidt entering the leftmost site
-    λi_inv = _diag_inverse(λi; cutoff=cutoff)
-    Ti = T
-    for site in 1:(n - 1)
-        # At iteration `site`, Ti has codomain (V_l_current, P_site, P_{site+1}, …, P_n)
-        # of rank (n - site + 2) and domain (V_right) of rank 1.
-        # Permute Ti to isolate site `site`: keep (V_l_current, P_site) in the
-        # codomain and move (P_{site+1}, …, P_n, V_right) into the domain,
-        # then SVD to extract the right-canonical site tensor A_site.
-        num_cod = numout(Ti)
-        cod_keep = (1, 2)
-        dom_move = ntuple(k -> 2 + k, num_cod - 2)
-        dom_inds = (dom_move..., num_cod + 1)
-        Ti_perm = permute(Ti, (cod_keep, dom_inds))
-
-        Ai, Λnew, Vt_part, _info = svd_trunc!(Ti_perm; trunc=truncstrat)
-        if renormalize
-            nrm = norm(Λnew)
-            if !iszero(nrm)
-                Λnew = Λnew / nrm
-            end
-        end
-
-        # Stored site tensor: B_site = λi⁻¹ · Ai · Λnew.
-        # Ai has codomain (V_l_current, P_site), domain (new_bond).
-        # λi has codomain (V_l_current) ← (V_l_current).
-        # Λnew has codomain (new_bond) ← (new_bond).
-        Ai_div = _absorb_diag_left(Ai, λi_inv)
-        Bi = _absorb_diag_right(Ai_div, Λnew)
-        ψ.Γ[site] = Bi
-        ψ.λ[site] = Λnew
-
-        # Prepare Ti for the next iteration: Ti_new = Λnew · Vt_part (left-mul
-        # by the new Schmidt). This way the next iteration's "λi" is Λnew.
-        if site < n - 1
-            Ti_new = _absorb_diag_left_on_codomain(Vt_part, Λnew)
-            # After absorption Ti_new has codomain (new_bond) and domain
-            # (P_{site+1}, …, P_n, V_right) — i.e. 1 codomain leg and
-            # (n - site + 1) domain legs. The next iteration expects Ti to
-            # have codomain (V_l_current = new_bond, P_{site+1}, …, P_n) of
-            # rank (n - site + 1) and domain (V_right) of rank 1, so move
-            # the leading (n - site) physical legs from domain into codomain.
-            # (For n=2 this branch never runs; n=3 is the first case that
-            # actually needs the repartition.)
-            new_cod_rank = n - site + 1
-            cod_inds = ntuple(k -> k, new_cod_rank)
-            dom_inds = (new_cod_rank + 1,)
-            Ti = permute(Ti_new, (cod_inds, dom_inds))
-            λi = Λnew
-            λi_inv = _diag_inverse(λi; cutoff=cutoff)
-        else
-            # Last iteration: do NOT left-mul by Λnew. The remaining Vt_part
-            # becomes the stored B_n directly (it is right-canonical by virtue
-            # of being an SVD isometry). However, we still need to reshape it
-            # to match the storage convention (V_l, P_n) ← V_right.
-            ψ.Γ[n] = _vt_to_site_tensor(Vt_part)
-        end
-    end
-    return ψ
-end
-
-# Helper: contract T with the next site G on T's right virtual leg.
-# T has codomain `(V_left, P_1, ..., P_{k-1})` and domain `V_mid`.
-# G has codomain `(V_mid, P_k)` and domain `V_right`.
-# Result has codomain `(V_left, P_1, ..., P_k)` and domain `V_right`.
-function _contract_right(T::AbstractTensorMap, G::AbstractTensorMap)
-    # Repartition G: codomain (V_mid,), domain (P_k, V_right).
-    G_perm = permute(G, ((1,), (2, 3)))
-    M = T * G_perm
-    num_cod_M = numout(M)
-    cod_inds = (ntuple(i -> i, num_cod_M)..., num_cod_M + 1)
-    dom_inds = (num_cod_M + 2,)
-    return permute(M, (cod_inds, dom_inds))
-end
-
 # Helper: convert a Vt-style tensor with codomain (new_bond,) and domain
 # (P, V_right) into the iMPS storage convention (V_left, P) ← V_right.
 function _vt_to_site_tensor(Vt::AbstractTensorMap)
     @assert numout(Vt) == 1 && numin(Vt) == 2
     return permute(Vt, ((1, 2), (3,)))
-end
-
-# Helper: absorb diagonal map λ on the RIGHT virtual leg of U.
-# U has codomain shape (..., V_mid) actually — wait we need to be careful.
-# In our convention, U from SVD has codomain (V_l, P), domain (V_mid). We want
-# U_new = U · λ where λ has codomain (V_mid) ← (V_mid). This is straightforward
-# composition: U * λ gives codomain (V_l, P), domain (V_mid_new).
-function _absorb_diag_right(U::AbstractTensorMap, λ::AbstractTensorMap)
-    return U * λ
 end
 
 # Helper: absorb diagonal map λi on the LEFT virtual leg of U.
@@ -1362,13 +1234,6 @@ end
 function _absorb_diag_left(U::AbstractTensorMap, λi_inv::AbstractTensorMap)
     @tensor out[a, s; c] := λi_inv[a; a'] * U[a', s; c]
     return out
-end
-
-# Helper: left-multiply a diagonal on the codomain side. For a Vt-style tensor
-# `Vt` with codomain (new_bond,) and domain (P_2, ..., P_n, V_r), absorb λ
-# (codomain (new_bond) ← (new_bond)) on the LEFT: λ * Vt.
-function _absorb_diag_left_on_codomain(Vt::AbstractTensorMap, λ::AbstractTensorMap)
-    return λ * Vt
 end
 
 function _graded_diagonal_max(λ::DiagonalTensorMap)

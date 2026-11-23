@@ -77,14 +77,44 @@ The gate list contains `(G, i, j)` tuples for the full requested interval.
 `steps` defaults to one. For multiple layers, the schedule combines adjacent
 substeps of the same layer at macro-step boundaries, just as layered
 `evolve!` does. Repeating a one-step gate list keeps the intermediate gate
-applications and truncations. Use that form when you need to sample or apply
-another operation after each macro-step.
+applications and truncations. Use that form when a separate operation belongs
+between macro-steps.
 
 Layered `evolve!` reuses the gates of its repeating schedule, so its
 prepared schedule takes the same space for a short or long evolution. With
 `gauge` enabled, it keeps each macro-step boundary explicit and restores the
 gauge there. At a finite bond cap, keeping the two half-steps can change the
 trajectory because they each have a local cutoff.
+
+### Sampling and truncation statistics
+
+`evolve!(ψ, gates, steps; observe, every)` and the layered and MPO forms all
+call `observe(φ, k, stats)` at `k = 0`, every `every` completed steps, and the
+final step. A gate list counts one complete sweep as one step. A layered or
+MPO evolution counts one complete Trotter step. Intermediate samples are
+private copies. Copy the initial and final states if retaining them. The
+sample has the gauge of the corresponding prefix run. For raw gate output,
+use a gauge-independent observable or restore the gauge on a copy.
+
+```julia
+function report(φ, k, stats)
+    isnothing(stats) && return
+    println(k, " ", stats.sum_discarded_weight, " ", stats.num_at_cap)
+end
+ψ, stats = evolve!(ψ, layers, dt, steps; observe=report, every=10,
+                   return_stats=:summary)
+```
+
+`return_stats=:summary` collects `sum_discarded_weight`, `max_discarded_weight`,
+`mean_discarded_weight`, `max_kept_dim`, `num_bond_updates`, and counts of bonds
+retained at the cap, requests above the cap, and unmet truncation targets.
+Use `return_stats=true` for full per-update details. Observer statistics
+describe the latest interval and are `nothing` at step zero. Gate observers
+receive summaries by default. MPO observers also receive per-update details
+by default, so use `return_stats=:summary` for scalar totals alone. At a
+merged Trotter boundary, a snapshot's closing substep contributes to the
+interval report. The full-run statistics count only updates in the main
+trajectory.
 
 ### Choosing a Trotter scheme
 
@@ -132,6 +162,26 @@ including in a sequence with both dense and diagonal terms. When the
 incoming Schmidt spectrum is ill-conditioned, a dense two-site update
 reconstructs the left tensor without dividing by those Schmidt values.
 Both reconstruction paths use the same SVD truncation rule and statistics.
+
+### Sampling at a time between full steps
+
+With an explicit gate list, keep the repeated gate sweep and a shorter final
+sweep separate. For example, to reach a sampling time of `0.29375` with a
+regular step of `0.005`:
+
+```julia
+gates = trotter_gates(layers, 0.005; trotter=:second)
+tail = trotter_gates(layers, 0.00375; trotter=:second)
+_, regular = evolve!(ψ, gates, 58; maxdim=128, truncerr=1e-10, return_stats=:summary)
+_, partial = evolve!(ψ, tail, 1; maxdim=128, truncerr=1e-10, return_stats=:summary)
+discarded = regular.sum_discarded_weight + partial.sum_discarded_weight
+# Measure ψ at the end of the interval.
+```
+
+Prepare both lists once if the same interval recurs. This specifies a
+truncation after each gate in the supplied sweeps. The layered `evolve!`
+overload may fuse adjacent stages across full steps before truncating, so
+choose the schedule before setting the sampling cadence.
 
 ## Gates on two separated endpoints
 

@@ -7,6 +7,7 @@ invariant [`iMPS`](@ref). From a canonicalized state you can compute:
 |----------|---------|
 | [`inner_product`](@ref) | self-norm per unit cell, or the overlap of two states |
 | [`expect`](@ref) | single-site and multi-site expectation values |
+| [`reduced_density`](@ref) | normalized density matrix on a short contiguous window |
 | [`ent_S`](@ref) | bipartite entanglement entropy across any bond |
 | [`energy_density`](@ref) | unit-cell averaged energy density of a local term |
 | [`energy_span`](@ref) | reachable low- and high-energy brackets |
@@ -148,6 +149,31 @@ psi = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
 Z = [1 0; 0 -1]
 expect(psi, kron(Z, Z), 1, 2)
 ```
+
+## Reduced density matrices
+
+[`reduced_density`](@ref) measures the requested interval in the
+Schmidt-canonical state `ψ`. It preserves complex coherences and uses the same
+physical basis as a `kron` product of onsite operators. Indices wrap through
+the cell, even when the window extends over more than one cell.
+
+For a state in an arbitrary gauge, call [`measurement_environments`](@ref) once
+and reuse the resulting snapshot across positions and window sizes. The snapshot
+owns the original tensors and environments. Prepare a new snapshot to measure
+the state after further evolution.
+
+```@example
+using InfiniteTEBD
+using LinearAlgebra
+
+ψ = product_iMPS(ComplexF64, [[1, 0], [0, 1]])
+env = measurement_environments(ψ)
+ρ = reduced_density(env, 2, 3)
+tr(ρ)
+```
+
+For local dimensions `d₁, …, dₖ`, the dense matrix has
+`(d₁ ⋯ dₖ)^2` entries. This is a readout for short windows.
 
 ## Entanglement entropy
 

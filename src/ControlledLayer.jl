@@ -56,9 +56,11 @@ function _merged_structure(first::ControlledCenter, last::ControlledCenter)
 end
 _merged_structure(::Any, ::Any) = nothing
 
-_controlled_eligible(ψ, W::iMPO, renormalize::Bool) =
-    !isnothing(_valid_structure(W)) && renormalize && ψ isa DenseIMPS{ComplexF64} &&
-    ψ.n == 2 && W.n == 2 && all(A -> size(A, 2) == 2, ψ.Γ)
+function _applicable_controlled_structure(ψ, W::iMPO, renormalize::Bool)
+    renormalize && ψ isa DenseIMPS{ComplexF64} && ψ.n == 2 && W.n == 2 &&
+        all(A -> size(A, 2) == 2, ψ.Γ) || return nothing
+    return _valid_structure(W)
+end
 
 # Sector representation of W·ψ: block-identity control tensor and the center tensor AT.
 function _controlled_tensors(ψ::DenseIMPS, S::ControlledCenter; rtol=_NULL_RTOL)

@@ -9,6 +9,8 @@ const TEST_GROUPS = Dict(
     "unit" => [
         "test_tensor_algebra.jl",
         "test_observables.jl",
+        "test_reduced_density.jl",
+        "test_normalized_overlap.jl",
         "test_adaptive_bonddim.jl",
         "test_gate_api.jl",
         "test_krylov.jl",
@@ -36,11 +38,13 @@ const TEST_GROUPS = Dict(
         "test_constraint_diagnostics.jl",
         "test_release_blockers.jl",
         "test_scarfinder_workflow.jl",
+        "test_scarfinder_hotpaths.jl",
         "test_pxp_mpo.jl",
     ],
     "api" => [
         "test_truncation_control.jl",
         "test_evolve_api.jl",
+        "test_evolution_observation.jl",
         "test_scarfinder_nstep.jl",
     ],
     "smoke" => [

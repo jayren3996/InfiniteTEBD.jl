@@ -41,6 +41,14 @@ as each gate is applied, so a later error can leave earlier updates in place.
 For a different variational manifold, compose your evolution and projection
 in an explicit loop.
 
+For an analytic iMPS ansatz, construct the starting state with
+`iMPS(T, tensors(q))` and evolve it using the same `evolve!` API. To fit
+the endpoint, pass the candidate's raw tensors and the evolved right-weighted
+tensors `ψ.Γ` to [`mixed_logoverlap`](@ref). The fit can use the analytic
+tensor derivatives without canonicalizing every trial. If the candidate
+norm varies with `q`, include the candidate log norm and its derivative in
+the objective. The chart, constraints and optimizer belong to the fit.
+
 ## The energy
 
 The energy is given by `terms`, a list of `(h, i, j)` (sites `i ≤ j` of the

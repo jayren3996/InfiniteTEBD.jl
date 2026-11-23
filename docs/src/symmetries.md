@@ -191,6 +191,10 @@ cuts. `recanonicalize=true` performs the legacy wraparound
 canonicalization, which can truncate other bonds as well. Gate statistics
 describe the local cut.
 
+When using a low-level fixed-cap gate with a non-Abelian TensorKit state,
+`observe` receives `stats=nothing` at each sample. Cut statistics are available
+for Abelian bond spaces.
+
 ```@example xxz
 # Schmidt spectrum on bond 1 — `schmidt_values` flattens all sectors
 # into a single descending-sorted Vector{Float64}. To inspect the

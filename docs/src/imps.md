@@ -126,6 +126,24 @@ Both constructors interpret `Γs` as raw local tensors (any shape, any normaliza
 
 [`rand_iMPS`](@ref) and [`product_iMPS`](@ref) are convenience constructors that always return a canonicalized state.
 
+## Overlap without recanonicalizing
+
+[`per_site_fidelity`](@ref) gives the overlap amplitude for two already
+normalized states. For raw tensors or states after a gate evolution, use
+[`log_per_site_fidelity`](@ref) to divide out both self-transfer radii. This
+uses the stored tensors directly, so the Schmidt vectors need not be in
+canonical form.
+
+```julia
+reference_norm = inner_product(reference; strict=true)
+logf = log_per_site_fidelity(reference, state; self_overlaps=(reference_norm, nothing))
+loss = -logf                       # negative log amplitude per site
+squared_fidelity = exp(2 * logf)   # squared fidelity per site
+```
+
+When comparing cells of lengths two and six, add `period=6`. Align the sites
+first with [`translate`](@ref) if a physical translation is intended.
+
 ## Example: random state, both views of site 1
 
 ```@example states

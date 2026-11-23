@@ -441,24 +441,78 @@ function _gate_update_stats(i::Integer, j::Integer, bond_stats)
     )
 end
 
-function _aggregate_evolution_stats(gate_updates)
-    bond_stats = BondStat[]
-    for update in gate_updates
-        append!(bond_stats, update.bond_stats)
+mutable struct _EvolutionStats{U}
+    updates::U
+    num_bond_updates::Int
+    sum_discarded_weight::Float64
+    max_discarded_weight::Float64
+    max_kept_dim::Int
+    num_saturated::Int
+    num_at_cap::Int
+    num_target_unmet::Int
+    num_structured::Int
+end
+
+_EvolutionStats(detail::Bool) = _EvolutionStats(detail ? Any[] : nothing, 0, 0.0, 0.0, 0, 0, 0, 0, 0)
+
+_supports_gate_statistics(::iMPS) = true
+
+function _evolution_recorders(mode, observe, every; detailed_observation=false,
+                              statistics_supported=true)
+    mode in (false, true, :summary) ||
+        throw(ArgumentError("return_stats must be false, true, or :summary"))
+    every >= 1 || throw(ArgumentError("every must be positive"))
+    mode !== false && !statistics_supported &&
+        throw(ArgumentError("gate truncation statistics are unavailable for this state backend"))
+    detail = mode === true || (mode === false && detailed_observation)
+    return (mode === false ? nothing : _EvolutionStats(mode === true),
+            isnothing(observe) || !statistics_supported ? nothing : _EvolutionStats(detail))
+end
+
+_record_evolution!(::Nothing, bonds, maxdim, update, structured=false) = nothing
+
+function _record_evolution!(stats::_EvolutionStats, bonds, maxdim, update, structured=false)
+    stats.num_structured += structured
+    for bond in bonds
+        if stats.num_bond_updates == 0 || bond.discarded_weight > stats.max_discarded_weight
+            stats.max_discarded_weight = bond.discarded_weight
+        end
+        stats.num_bond_updates += 1
+        stats.sum_discarded_weight += bond.discarded_weight
+        stats.max_kept_dim = max(stats.max_kept_dim, bond.chi_keep)
+        stats.num_saturated += bond.saturated
+        stats.num_at_cap += bond.chi_keep == maxdim
+        stats.num_target_unmet += !bond.target_met
     end
+    isnothing(stats.updates) || push!(stats.updates, update)
+    return nothing
+end
 
-    max_discarded_weight = isempty(bond_stats) ? 0.0 : maximum(stat.discarded_weight for stat in bond_stats)
-    mean_discarded_weight = isempty(bond_stats) ? 0.0 : sum(stat.discarded_weight for stat in bond_stats) / length(bond_stats)
-    max_kept_dim = isempty(bond_stats) ? 0 : maximum(stat.chi_keep for stat in bond_stats)
-    num_saturated = count(stat -> stat.saturated, bond_stats)
-
-    (
-        gate_updates=gate_updates,
-        max_discarded_weight=max_discarded_weight,
-        mean_discarded_weight=mean_discarded_weight,
-        max_kept_dim=max_kept_dim,
-        num_saturated=num_saturated,
+function _evolution_report(stats::_EvolutionStats, mpo::Bool)
+    summary = (
+        sum_discarded_weight=stats.sum_discarded_weight,
+        max_discarded_weight=stats.max_discarded_weight,
+        mean_discarded_weight=stats.sum_discarded_weight / max(stats.num_bond_updates, 1),
+        max_kept_dim=stats.max_kept_dim,
+        num_saturated=stats.num_saturated,
+        num_at_cap=stats.num_at_cap,
+        num_target_unmet=stats.num_target_unmet,
+        num_bond_updates=stats.num_bond_updates,
     )
+    if mpo
+        summary = (; summary..., num_structured=stats.num_structured)
+    end
+    isnothing(stats.updates) && return summary
+    return mpo ? (; updates=stats.updates, summary...) : (; gate_updates=stats.updates, summary...)
+end
+
+function _sample_evolution(observe, ψ, step, stats; mpo=false)
+    if isnothing(stats)
+        observe(ψ, step, nothing)
+        return nothing
+    end
+    observe(ψ, step, _evolution_report(stats, mpo))
+    return _EvolutionStats(!isnothing(stats.updates))
 end
 
 function _validate_trotter_scheme(num_layers::Integer, trotter::Symbol)
@@ -604,6 +658,9 @@ function _trotter_time_prefactor(dt::Real, coeff::Real, evolution::Symbol)
     throw(ArgumentError("unknown evolution $(repr(evolution)); use :real or :imaginary"))
 end
 
+_trotter_gate_exp(h, scale) = exp(scale * h)
+_trotter_gate_exp(h::Diagonal, scale) = Diagonal(exp.(scale .* h.diag))
+
 function _materialize_trotter_gates(
     layers,
     dt::Real,
@@ -635,8 +692,7 @@ function _materialize_trotter_gates(
         for (h, i, j) in layers[layer_idx]
             by_coefficient = get!(() -> Dict{Float64, gate_type}(), cache, h)
             G = get!(by_coefficient, Float64(coeff)) do
-                h isa Diagonal ? Diagonal(Vector{T}(exp.(scale .* h.diag))) :
-                    convert(Matrix{T}, exp(scale * h))
+                convert(h isa Diagonal ? diagonal_type : Matrix{T}, _trotter_gate_exp(h, scale))
             end
             push!(gates, (G, i, j))
         end
@@ -648,13 +704,14 @@ end
 
 # The published multi-layer schedules begin and end in the same layer.
 # Reuse the gates for that merged boundary and for the interior stages.
-function _iterated_trotter_gates(layers, dt, steps; trotter, evolution)
+function _trotter_gate_parts(layers, dt, steps; trotter, evolution)
     n = length(layers)
     _validate_trotter_evolution(trotter, evolution)
     stages = _trotter_stage_schedule(n, trotter, min(steps, 1))
     if steps <= 1 || n == 1
         gates = _materialize_trotter_gates(layers, dt, stages; evolution)
-        return steps <= 1 || isempty(gates) ? gates : Iterators.flatten(Iterators.repeated(gates, steps))
+        empty = view(gates, 1:0)
+        return (initial=gates, interior=gates, boundary=empty, final=empty)
     end
 
     first_layer, first_coeff = first(stages)
@@ -667,14 +724,25 @@ function _iterated_trotter_gates(layers, dt, steps; trotter, evolution)
     end
     stage_ends = Int[]
     gates = _materialize_trotter_gates(layers, dt, stages; evolution, stage_ends)
-    isempty(gates) && return gates
     initial = view(gates, 1:stage_ends[m-1])
     interior = view(gates, stage_ends[1]+1:stage_ends[m-1])
     boundary = view(gates, stage_ends[m]+1:length(gates))
     final = view(gates, stage_ends[m-1]+1:stage_ends[m])
-    repeating = Iterators.flatten(Iterators.repeated((boundary, interior), steps-1))
-    return Iterators.flatten(Iterators.flatten(((initial,), repeating, (final,))))
+    return (; initial, interior, boundary, final)
 end
+
+function _iterated_trotter_gates(parts, steps)
+    repeating = Iterators.flatten(Iterators.repeated((parts.boundary, parts.interior), max(steps-1, 0)))
+    return Iterators.flatten(Iterators.flatten(((parts.initial,), repeating, (parts.final,))))
+end
+
+function _iterated_trotter_gates(layers, dt, steps; trotter, evolution)
+    parts = _trotter_gate_parts(layers, dt, steps; trotter, evolution)
+    return _iterated_trotter_gates(parts, steps)
+end
+
+_initial_evolution_chi(ψ, chi_policy, mindim, maxdim) =
+    chi_policy === :adaptive ? min(maxdim, max(mindim, maximum(_bond_dim, ψ.λ; init=mindim))) : maxdim
 
 function _evolve_gate_sequence!(
     ψ::iMPS,
@@ -686,19 +754,20 @@ function _evolve_gate_sequence!(
     cutoff::Union{Nothing,Real}=nothing,
     renormalize::Bool=true,
     recanonicalize::Bool=false,
-    return_stats::Bool=false,
     chi_policy::Symbol=:fixed,
     q::Real=1.0,
-    alpha::Real=0.1
+    alpha::Real=0.1,
+    χ::Integer=_initial_evolution_chi(ψ, chi_policy, mindim, maxdim),
+    stats=nothing,
+    interval=nothing,
 )
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_chi_policy(chi_policy)
-    gate_updates = return_stats ? Any[] : nothing
-    χ = chi_policy === :adaptive ? min(maxdim, max(mindim, maximum(_bond_dim, ψ.λ; init=mindim))) : maxdim
+    track = !isnothing(stats) || !isnothing(interval)
     for gate in gates
         G, i, j = gate
-        if return_stats
-            _, stats = applygate!(
+        if track
+            _, update = applygate!(
                 ψ,
                 G,
                 i,
@@ -711,7 +780,8 @@ function _evolve_gate_sequence!(
                 recanonicalize,
                 return_stats=true,
             )
-            push!(gate_updates, stats)
+            _record_evolution!(stats, update.bond_stats, maxdim, update)
+            _record_evolution!(interval, update.bond_stats, maxdim, update)
         else
             applygate!(ψ, G, i, j; maxdim, mindim, truncerr, svd_min=svd_floor, renormalize, recanonicalize)
         end
@@ -735,7 +805,7 @@ function _evolve_gate_sequence!(
         end
     end
 
-    return gate_updates
+    return χ
 end
 
 export trotter_gates
@@ -806,7 +876,7 @@ end
 
 export evolve!
 """
-    evolve!(ψ, gates, steps; maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, gauge=nothing, return_stats=false)
+    evolve!(ψ, gates, steps; maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, gauge=nothing, return_stats=false, observe=nothing, every=1)
 
 Apply a sequence of local gates repeatedly for `steps` sweeps.
 
@@ -848,12 +918,24 @@ Keyword arguments:
   Requires `renormalize=true` and `recanonicalize=false`. If a sweep or
   its checkpoint fails, the state retains the last completed sweep.
 - `return_stats=false`
-  If `true`, also return aggregated truncation diagnostics for the full
-  evolution.
+  Use `:summary` to return totals for the full evolution in constant space,
+  or `true` to also retain the detailed `gate_updates` history. The totals
+  include summed, maximum and mean discarded weight, and counts of bond
+  updates, saturation, retained dimensions at `maxdim`, and unmet targets.
+- `observe=nothing`, `every=1`
+  Call `observe(φ, k, stats)` at step zero, after every `every` full sweeps,
+  and after the final sweep. `stats` is `nothing` at zero and describes the
+  interval since the previous sample thereafter. It includes per-gate detail
+  only with `return_stats=true`. Intermediate samples are private copies;
+  the initial and final samples are the live state. Treat samples as read-only
+  and copy live samples before retaining them. The state gauge is the same
+  as for the corresponding prefix run with the chosen update options.
+  Backends without supported cut statistics call the observer with
+  `stats=nothing` at all samples and reject an explicit statistics request.
 
 Returns:
 - `ψ` when `return_stats = false`.
-- `(ψ, stats)` when `return_stats = true`.
+- `(ψ, stats)` when `return_stats = :summary` or `true`.
 
 Notes:
 - `truncerr = 0` reproduces the standard fixed-cap behavior with `maxdim` as the
@@ -886,17 +968,21 @@ function evolve!(
     renormalize::Bool=true,
     recanonicalize::Bool=false,
     gauge::Union{Nothing,Symbol}=nothing,
-    return_stats::Bool=false
+    return_stats::Union{Bool,Symbol}=false,
+    observe=nothing,
+    every::Integer=1,
 )
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_evolve_args(steps, maxdim, mindim, truncerr, svd_floor)
     _validate_chi_policy(chi_policy)
     _validate_gauge_checkpoint(ψ, gauge, renormalize, recanonicalize)
 
-    gate_updates = return_stats ? Any[] : nothing
-    for _ in 1:steps
+    stats, interval = _evolution_recorders(return_stats, observe, every;
+                                           statistics_supported=_supports_gate_statistics(ψ))
+    isnothing(observe) || observe(ψ, 0, nothing)
+    for step in 1:steps
         trial = isnothing(gauge) ? ψ : deepcopy(ψ)
-        updates = _evolve_gate_sequence!(
+        _evolve_gate_sequence!(
             trial,
             gates;
             maxdim,
@@ -908,21 +994,25 @@ function evolve!(
             alpha,
             renormalize,
             recanonicalize,
-            return_stats,
+            stats,
+            interval,
         )
         if !isnothing(gauge)
             restore_canonical!(trial; method=gauge)
             ψ.Γ .= trial.Γ
             ψ.λ .= trial.λ
         end
-        return_stats && append!(gate_updates, updates)
+        if !isnothing(observe) && (step % every == 0 || step == steps)
+            sample = step == steps ? ψ : deepcopy(ψ)
+            interval = _sample_evolution(observe, sample, step, interval)
+        end
     end
 
-    return_stats ? (ψ, _aggregate_evolution_stats(gate_updates)) : ψ
+    return isnothing(stats) ? ψ : (ψ, _evolution_report(stats, false))
 end
 
 """
-    evolve!(ψ, layers, dt, steps; trotter=:second, evolution=:real, maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, gauge=nothing, return_stats=false)
+    evolve!(ψ, layers, dt, steps; trotter=:second, evolution=:real, maxdim=MAXDIM, mindim=1, truncerr=0.0, svd_min=SVDTOL, renormalize=true, gauge=nothing, return_stats=false, observe=nothing, every=1)
 
 Evolve `ψ` under a Hamiltonian split into commuting layers.
 
@@ -954,6 +1044,11 @@ Keyword arguments:
   Match the gate-list [`evolve!`](@ref) interface. In particular,
   `recanonicalize=false` by default — pass `recanonicalize=true` for
   imaginary-time evolution.
+- `observe`, `every`
+  As for gate-list evolution, with samples after complete Trotter steps.
+  At an interior merged boundary the remaining half step is applied only
+  on a sample copy. Its truncation contributes to that interval report;
+  full-run statistics cover only the updates in the main trajectory.
 
 Returns:
 - The same object `ψ`, mutated in place.
@@ -993,7 +1088,9 @@ function evolve!(
     renormalize::Bool=true,
     recanonicalize::Bool=false,
     gauge::Union{Nothing,Symbol}=nothing,
-    return_stats::Bool=false
+    return_stats::Union{Bool,Symbol}=false,
+    observe=nothing,
+    every::Integer=1,
 )
     svd_floor = _resolve_svd_min(svd_min, cutoff)
     _validate_evolve_args(steps, maxdim, mindim, truncerr, svd_floor)
@@ -1004,30 +1101,42 @@ function evolve!(
         gates = trotter_gates(layers, dt; trotter, evolution)
         isempty(gates) || _check_gate_eltype(ψ, gates[1][1])
         return evolve!(ψ, gates, steps; maxdim, mindim, truncerr, svd_min=svd_floor,
-            chi_policy, q, alpha, renormalize, gauge, return_stats)
+            chi_policy, q, alpha, renormalize, gauge, return_stats, observe, every)
     end
-    gates = _iterated_trotter_gates(layers, dt, steps; trotter, evolution)
+    stats, interval = _evolution_recorders(return_stats, observe, every;
+                                           statistics_supported=_supports_gate_statistics(ψ))
+    parts = _trotter_gate_parts(layers, dt, steps; trotter, evolution)
+    gates = _iterated_trotter_gates(parts, steps)
     # Fail before touching ψ: real-time gates are complex, so a default
     # Float64 state would otherwise error mid-sweep with part of the unit
     # cell already updated.
     head = iterate(gates)
     isnothing(head) || _check_gate_eltype(ψ, head[1][1])
 
-    updates = _evolve_gate_sequence!(
-        ψ,
-        gates;
-        maxdim,
-        mindim,
-        truncerr,
-        svd_min=svd_floor,
-        chi_policy,
-        q,
-        alpha,
-        renormalize,
-        recanonicalize,
-        return_stats,
-    )
-    return_stats ? (ψ, _aggregate_evolution_stats(updates)) : ψ
+    controls = (; maxdim, mindim, truncerr, svd_min=svd_floor, chi_policy, q, alpha,
+                renormalize, recanonicalize)
+    if isnothing(observe)
+        _evolve_gate_sequence!(ψ, gates; controls..., stats)
+    else
+        observe(ψ, 0, nothing)
+        χ = _initial_evolution_chi(ψ, chi_policy, mindim, maxdim)
+        for step in 1:steps
+            body = step == 1 ? parts.initial : Iterators.flatten((parts.boundary, parts.interior))
+            χ = _evolve_gate_sequence!(ψ, body; controls..., χ, stats, interval)
+            final_step = step == steps
+            if final_step
+                _evolve_gate_sequence!(ψ, parts.final; controls..., χ, stats, interval)
+            end
+            if step % every == 0 || final_step
+                sample = final_step ? ψ : deepcopy(ψ)
+                if !final_step && !isempty(parts.final)
+                    _evolve_gate_sequence!(sample, parts.final; controls..., χ, interval)
+                end
+                interval = _sample_evolution(observe, sample, step, interval)
+            end
+        end
+    end
+    return isnothing(stats) ? ψ : (ψ, _evolution_report(stats, false))
 end
 
 #---------------------------------------------------------------------------------------------------

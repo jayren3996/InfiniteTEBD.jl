@@ -54,10 +54,23 @@ end
 end
 
 @testset "NATURAL_BONDDIM_EXTREME_Q" begin
-    # Extreme q values should not overflow/underflow
     spectrum = [sqrt(0.5), sqrt(0.5)]
-    @test isfinite(natural_bonddim(spectrum; q=1e6))
-    @test isfinite(natural_bonddim(spectrum; q=1e-6))
+    @test natural_bonddim(spectrum; q=1e6, alpha=0.0) ≈ 2.0
+    @test natural_bonddim(spectrum; q=1e-6, alpha=0.0) ≈ 2.0
+
+    uneven = [0.8, 0.6]
+    @test natural_bonddim(uneven; q=1e6, alpha=0.0) ≈ inv(0.64) rtol=1e-6
+    @test natural_bonddim(uneven; q=Inf, alpha=0.0) ≈ inv(0.64)
+    @test adaptive_bonddim(1, uneven; q=1e6, alpha=0.0, maxdim=32) == 2
+    @test adaptive_bonddim(1, uneven; alpha=1e100, maxdim=32) == 32
+    for scale in (1e-200, 1e200), q in (0.0, 1.0, 2.0, 1e6)
+        @test natural_bonddim(scale .* reverse(uneven); q, cutoff=0.0) ≈
+            natural_bonddim(uneven; q, cutoff=0.0)
+    end
+
+    # Both modes clear the raw cutoff. Shannon only counts the larger
+    # mode after the retained weights are normalized.
+    @test natural_bonddim(2 .* sqrt.([0.9, 0.1]); alpha=0, cutoff=0.12) ≈ exp(-0.9log(0.9))
 end
 
 @testset "NATURAL_BONDDIM_Q_ZERO_IS_SUPPORT_COUNT" begin
