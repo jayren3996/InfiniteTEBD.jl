@@ -46,7 +46,8 @@ end
     U = trotter_mpos([[(H, 2, 4)], [(H, 1, 3)]], 0.11; n=2)
     initial = product_iMPS(ComplexF64, [[0.8, 0.6], [0.6, 0.8]])
     for (structured, renormalize) in ((true, true), (false, true), (false, false))
-        opts = (; maxdim=1, merge=false, structured, renormalize, return_stats=:summary)
+        opts = (; maxdim=1, merge=false, structured, renormalize, return_stats=:summary,
+                orth_tol=1e-12)
         samples = []
         state, stats = evolve!(deepcopy(initial), U, 3; opts...,
                               observe=(ψ, k, r) -> 0 < k < 3 && push!(samples, ψ))
@@ -71,10 +72,10 @@ end
     U = trotter_mpos(layers, 0.19; n=1)
     initial = product_iMPS(ComplexF64, [[1, 0]])
 
-    regular = scarfinder!(deepcopy(initial), U, 1, 3; nstep=2, refine=false)
+    regular = scarfinder!(deepcopy(initial), U, 1, 3; nstep=2, refine=false, orth_tol=1e-12)
     manual = deepcopy(initial)
     for _ in 1:3
-        @test scarfinder_step!(manual, U, 1; nstep=2).loss ≈ 0 atol=1e-14
+        @test scarfinder_step!(manual, U, 1; nstep=2, orth_tol=1e-12).loss ≈ 0 atol=1e-14
     end
     @test regular.Γ == manual.Γ && regular.λ == manual.λ
     @test project!(deepcopy(initial), 1; terms=[(X, 1, 1)]).energy_error === nothing

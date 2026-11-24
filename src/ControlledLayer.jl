@@ -112,7 +112,7 @@ end
 # Like `_right_orthonormalize`/`_left_factors`, a slowly converging iteration (small transfer
 # gap, e.g. near-crystal χ = 2 states) is accelerated by an Arnoldi step on the fixed-point
 # map of the seam factor; convergence is always decided by the same residual test.
-function _controlled_canonical(ψ, S, ct; tol=_ORTH_TOL, maxiter=_CONTROLLED_MAXITER[])
+function _controlled_canonical(ψ, S, ct; orth_tol=nothing, maxiter=_CONTROLLED_MAXITER[])
     AT, D, ids = ct.AT, ct.D, ct.ids
     C0, D0 = _controlled_seeds(ψ, S, ct)
     AT2 = reshape(AT, 2D, D)
@@ -161,7 +161,7 @@ function _controlled_canonical(ψ, S, ct; tol=_ORTH_TOL, maxiter=_CONTROLLED_MAX
         Cn = Lc ./ nc
         logc = log(nt) + log(nc)
         δprev, δ = δ, norm(Cn - C0)
-        done, best, since = _orth_progress(δ, best, since, tol)
+        done, best, since = _orth_progress(δ, best, since, orth_tol)
         C0 = Cn
     end
     # left: through the center (dense QR), then the control (block QR)
@@ -199,7 +199,7 @@ function _controlled_canonical(ψ, S, ct; tol=_ORTH_TOL, maxiter=_CONTROLLED_MAX
         end
         Dn = Rc ./ _checked_norm(Rc)
         δprev, δ = δ, norm(Dn - D0)
-        done, best, since = _orth_progress(δ, best, since, tol)
+        done, best, since = _orth_progress(δ, best, since, orth_tol)
         D0 = Dn
     end
     FC = svd(D0 * CT)        # bond control → center
@@ -215,10 +215,10 @@ end
 
 # Structured W·ψ followed by the shared truncation; `nothing` means "use the generic path".
 # ψ is not modified.
-function _apply_controlled(ψ, S; maxdim, cutoff, truncerr, renormalize, recanonicalize)
+function _apply_controlled(ψ, S; maxdim, cutoff, truncerr, renormalize, recanonicalize, orth_tol)
     result = try
         ct = _controlled_tensors(ψ, S)
-        isnothing(ct) ? nothing : _controlled_canonical(ψ, S, ct)
+        isnothing(ct) ? nothing : _controlled_canonical(ψ, S, ct; orth_tol)
     catch err
         # Any numerical failure, including a zero norm, is left to the generic path, which
         # then decides (e.g. throws MPOAnnihilationError under its usual conditions).
@@ -230,6 +230,6 @@ function _apply_controlled(ψ, S; maxdim, cutoff, truncerr, renormalize, recanon
     tensors, spectra, lognorm = result
     trial = iMPS(tensors, spectra, 2)
     stats, sliced = _truncate_canonical!(trial; maxdim, cutoff, truncerr, renormalize,
-                                         recanonicalize)
+                                         recanonicalize, orth_tol)
     return trial, stats, lognorm, sliced
 end

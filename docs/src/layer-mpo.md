@@ -86,6 +86,14 @@ The enlarged bond often has exact null directions, which would make the QR
 factor non-unique; they are first removed by rank-revealing SVD sweeps that
 rewrite the cell exactly with smaller bonds.
 
+Use `orth_tol` on `apply!`, MPO `evolve!` or `truncate!` to set the
+tolerance on the change in the normalized seam factor between sweeps.
+The default targets `1e-13` and accepts a final residual up to `1e-10` if the
+generic sweep stalls or reaches its iteration cap. An explicit value, such
+as `orth_tol=1e-11`, is enforced on both sweeps. If either sweep misses it,
+the generic update raises `CanonicalFormError` with the measured residual
+and the requested tolerance.
+
 Inside [`evolve!`](@ref), truncated intermediate states are only renormalized,
 as in Orús and Vidal; the next application restores the canonical form, and
 the state returned is canonical.

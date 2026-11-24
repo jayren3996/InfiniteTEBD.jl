@@ -424,7 +424,7 @@ end
 # MPO algebra
 #---------------------------------------------------------------------------------------------------
 """
-    compress_mpo(W; cutoff=1e-14)
+    compress_mpo(W; cutoff=1e-14, orth_tol=nothing)
 
 Remove redundant bond dimension from an [`iMPO`](@ref).
 
@@ -435,16 +435,18 @@ is restored afterwards, so the result represents the same operator, not just
 the same operator up to normalization. If no bond shrinks, `W` itself is
 returned unchanged.
 
+Use `orth_tol` to set the canonicalization tolerance as in [`truncate!`](@ref).
 This is meant for exact (lossless up to `cutoff`) compression, e.g. after a
 product of MPOs. It assumes the operator, viewed as a state, is injective.
 """
-function compress_mpo(W::iMPO; cutoff::Real=MPO_CUTOFF)
+function compress_mpo(W::iMPO; cutoff::Real=MPO_CUTOFF, orth_tol::Union{Nothing,Real}=nothing)
+    _validate_orth_tol(orth_tol)
     all(==(1), bonddims(W)) && return W
     T = promote_type(eltype(W), Float64)
     dims = [(size(A, 2), size(A, 3)) for A in W.W]
     Γs = [reshape(Array{T}(A), size(A, 1), size(A, 2) * size(A, 3), size(A, 4)) for A in W.W]
     ψ = iMPS(copy(Γs), [ones(real(T), size(A, 3)) for A in Γs], W.n)
-    _canonical_truncate!(ψ; maxdim=typemax(Int), cutoff, truncerr=0.0, renormalize=true)[1]
+    _canonical_truncate!(ψ; maxdim=typemax(Int), cutoff, truncerr=0.0, renormalize=true, orth_tol)
     newdims = [length(λ) for λ in ψ.λ]
     all(newdims .>= bonddims(W)) && return W
     z = _dominant_chain_eigenvalue(ψ.Γ, Γs; dense_threshold=0, dense_size=64, tol=1e-14)
@@ -456,17 +458,18 @@ function compress_mpo(W::iMPO; cutoff::Real=MPO_CUTOFF)
 end
 
 """
-    mpo_multiply(A, B; compress=true, cutoff=1e-14)
+    mpo_multiply(A, B; compress=true, cutoff=1e-14, orth_tol=nothing)
     A * B
 
 Operator product `A · B` of two [`iMPO`](@ref)s (`B` acts first). The result
 has cell length `lcm(A.n, B.n)` and bond dimensions multiply. With
 `compress=true` (the default, also used by `*`) the product is passed through
-[`compress_mpo`](@ref) at the stated `cutoff`, which for instance turns
+[`compress_mpo`](@ref) at the stated `cutoff` and `orth_tol`, which for instance turns
 `U_A(dt/2) * U_A(dt/2)` back into a bond-dimension-2 representation of
 `U_A(dt)`.
 """
-function mpo_multiply(A::iMPO, B::iMPO; compress::Bool=true, cutoff::Real=MPO_CUTOFF)
+function mpo_multiply(A::iMPO, B::iMPO; compress::Bool=true, cutoff::Real=MPO_CUTOFF,
+                      orth_tol::Union{Nothing,Real}=nothing)
     m = lcm(A.n, B.n)
     W = Vector{Array{promote_type(eltype(A), eltype(B)),4}}(undef, m)
     for i in 1:m
@@ -475,7 +478,7 @@ function mpo_multiply(A::iMPO, B::iMPO; compress::Bool=true, cutoff::Real=MPO_CU
         W[i] = _compose_site(A[i], B[i])
     end
     P = iMPO(W, m)
-    return compress ? compress_mpo(P; cutoff) : P
+    return compress ? compress_mpo(P; cutoff, orth_tol) : P
 end
 
 Base.:*(A::iMPO, B::iMPO) = mpo_multiply(A, B)
@@ -487,6 +490,12 @@ function _validate_mpo_truncation(maxdim, cutoff, truncerr)
     maxdim isa Integer && maxdim > 0 || throw(ArgumentError("maxdim must be a positive integer"))
     isfinite(cutoff) && cutoff >= 0 || throw(ArgumentError("cutoff must be finite and non-negative"))
     isfinite(truncerr) && truncerr >= 0 || throw(ArgumentError("truncerr must be finite and non-negative"))
+    return nothing
+end
+
+function _validate_orth_tol(orth_tol)
+    isnothing(orth_tol) || (isfinite(orth_tol) && orth_tol > 0) ||
+        throw(ArgumentError("orth_tol must be finite and positive"))
     return nothing
 end
 
@@ -511,17 +520,25 @@ end
 
 const _ORTH_TOL = 1e-13
 const _ORTH_MAXITER = 2000
-# The seam residual has a roundoff floor of a few ε·dim. A residual that stops decreasing
-# for `_ORTH_STALL` sweeps below `_ORTH_FLOOR` is accepted as converged.
+# The default targets _ORTH_TOL but allows a roundoff floor on slow or stalled sweeps.
+# An explicit orth_tol is always enforced on the final sweep.
 const _ORTH_STALL = 25
 const _ORTH_FLOOR = 1e-10
 
 # Convergence bookkeeping: returns (done, best, since_best).
-function _orth_progress(δ, best, since, tol)
-    δ <= tol && return true, δ, 0
+function _orth_progress(δ, best, since, orth_tol)
+    δ <= something(orth_tol, _ORTH_TOL) && return true, δ, 0
     δ < best && return false, δ, 0
     since += 1
-    return since >= _ORTH_STALL && best <= _ORTH_FLOOR, best, since
+    return isnothing(orth_tol) && since >= _ORTH_STALL && δ <= _ORTH_FLOOR, best, since
+end
+
+function _check_orth_convergence(δ, orth_tol, maxiter, side)
+    limit = something(orth_tol, _ORTH_FLOOR)
+    δ <= limit || throw(CanonicalFormError(
+        "canonical form: $side orthonormalization did not converge in $maxiter sweeps " *
+        "(residual $δ exceeds tolerance $limit)"))
+    return nothing
 end
 
 # Phases making the diagonal of a triangular factor real and non-negative. A pivot at the
@@ -711,18 +728,16 @@ function _accelerate(map, X, δ)
 end
 
 # Right-isometric B with A₁⋯Aₙ C = c C B₁⋯Bₙ, C the converged seam factor.
-function _right_orthonormalize(A; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
+function _right_orthonormalize(A; orth_tol=nothing, maxiter=_ORTH_MAXITER)
     χ = size(A[end], 3)
     C = Matrix{eltype(A[1])}(I, χ, χ) ./ sqrt(χ)
     # X ↦ Σ A X B† over the cell, whose fixed point is C (up to scale)
     packs, Cn, logc = _lq_sweep(A, C)
     δ = norm(Cn - C)
     δprev = Inf
-    done, best, since = _orth_progress(δ, Inf, 0, tol)
+    done, best, since = _orth_progress(δ, Inf, 0, orth_tol)
     iter = 1
-    while !done
-        iter < maxiter || throw(CanonicalFormError("canonical form: right orthonormalization " *
-                                                   "did not converge in $maxiter sweeps (residual $δ)"))
+    while !done && iter < maxiter
         if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
             action = _chain_transfer_action(_right_isometries(packs), A; dir=:r)
             C = first(_pos_lq(_accelerate(action, Cn, δ)))
@@ -733,23 +748,22 @@ function _right_orthonormalize(A; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
         δprev = δ
         packs, Cn, logc = _lq_sweep(A, C)
         δ = norm(Cn - C)
-        done, best, since = _orth_progress(δ, best, since, tol)
+        done, best, since = _orth_progress(δ, best, since, orth_tol)
         iter += 1
     end
+    _check_orth_convergence(δ, orth_tol, maxiter, :right)
     return _right_isometries(packs), Cn, logc
 end
 
 # Bond factors of a right-isometric chain from left orthonormalization (D B⋯ = A⋯ D).
-function _left_factors(B, D0; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
+function _left_factors(B, D0; orth_tol=nothing, maxiter=_ORTH_MAXITER)
     D = D0
     packs, centers = _qr_sweep(B, D)
     δ = norm(centers[end] - D)
     δprev = Inf
-    done, best, since = _orth_progress(δ, Inf, 0, tol)
+    done, best, since = _orth_progress(δ, Inf, 0, orth_tol)
     iter = 1
-    while !done
-        iter < maxiter || throw(CanonicalFormError("canonical form: left orthonormalization " *
-                                                   "did not converge in $maxiter sweeps (residual $δ)"))
+    while !done && iter < maxiter
         if iter >= _ACCEL_AFTER && δ > _ACCEL_MIN && δ > _ACCEL_RATIO * δprev
             action = _left_chain_transfer_action(_left_isometries(packs), B)
             D = last(_pos_qr(_accelerate(action, centers[end], δ)))
@@ -760,29 +774,31 @@ function _left_factors(B, D0; tol=_ORTH_TOL, maxiter=_ORTH_MAXITER)
         δprev = δ
         packs, centers = _qr_sweep(B, D)
         δ = norm(centers[end] - D)
-        done, best, since = _orth_progress(δ, best, since, tol)
+        done, best, since = _orth_progress(δ, best, since, orth_tol)
         iter += 1
     end
+    _check_orth_convergence(δ, orth_tol, maxiter, :left)
     centers[end] = D
     return centers
 end
 
 # The right sweep determines the cell norm before the left Schmidt factors are needed.
-function _right_canonical_with_norm(A; reduce::Bool=true)
+function _right_canonical_with_norm(A; reduce::Bool=true, orth_tol=nothing)
     A, lognull = reduce ? _remove_null_directions(A) : (A, 0.0)
-    B, _, logc = _right_orthonormalize(A)
+    B, _, logc = _right_orthonormalize(A; orth_tol)
     return B, logc + lognull
 end
 
 # Schmidt-canonical form of the cell `A` in the stored convention B = Γλ.
 # Returns (tensors, spectra, log of the norm per cell).
-function _mixed_canonical(A::Vector{<:AbstractArray{<:Number,3}}; reduce::Bool=true)
+function _mixed_canonical(A::Vector{<:AbstractArray{<:Number,3}};
+                          reduce::Bool=true, orth_tol=nothing)
     n = length(A)
-    B, logc = _right_canonical_with_norm(A; reduce)
+    B, logc = _right_canonical_with_norm(A; reduce, orth_tol)
     k = size(B[1], 1)
     D0 = Matrix{eltype(B[1])}(I, k, k)
     D0 ./= norm(D0)
-    centers = _left_factors(B, D0)
+    centers = _left_factors(B, D0; orth_tol)
     Vs = Vector{Matrix{eltype(B[1])}}(undef, n)
     spectra = Vector{Vector{real(eltype(B[1]))}}(undef, n)
     for i in 1:n
@@ -800,9 +816,10 @@ function _mixed_canonical(A::Vector{<:AbstractArray{<:Number,3}}; reduce::Bool=t
     return out, spectra, logc
 end
 
-function _precise_canonical!(ψ::DenseIMPS; renormalize::Bool=true, reduce::Bool=true)
+function _precise_canonical!(ψ::DenseIMPS; renormalize::Bool=true, reduce::Bool=true,
+                             orth_tol=nothing)
     T = eltype(ψ)
-    tensors, spectra, lognorm = _mixed_canonical(ψ.Γ; reduce)
+    tensors, spectra, lognorm = _mixed_canonical(ψ.Γ; reduce, orth_tol)
     for i in 1:ψ.n
         ψ.Γ[i] = Array{T,3}(tensors[i])
         ψ.λ[i] = convert(typeof(ψ.λ[i]), spectra[i])
@@ -822,16 +839,17 @@ const _NULL_FLOOR = 1e-14
 # their scheme). Returns (per-bond BondStats, log norm per cell of the input, whether any
 # bond was sliced).
 function _canonical_truncate!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormalize,
-                              recanonicalize::Bool=true)
-    lognorm = _precise_canonical!(ψ; renormalize)
-    stats, sliced = _truncate_canonical!(ψ; maxdim, cutoff, truncerr, renormalize, recanonicalize)
+                              recanonicalize::Bool=true, orth_tol=nothing)
+    lognorm = _precise_canonical!(ψ; renormalize, orth_tol)
+    stats, sliced = _truncate_canonical!(ψ; maxdim, cutoff, truncerr, renormalize,
+                                         recanonicalize, orth_tol)
     return stats, lognorm, sliced
 end
 
 # Per-bond truncation of a state already in exact canonical form (shared by the generic
 # and the structured MPO updates, so both truncate identically).
 function _truncate_canonical!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormalize,
-                              recanonicalize::Bool=true)
+                              recanonicalize::Bool=true, orth_tol=nothing)
     stats = Vector{BondStat}(undef, ψ.n)
     keep = Vector{Int}(undef, ψ.n)
     floor = max(cutoff, _NULL_FLOOR)
@@ -867,21 +885,21 @@ function _truncate_canonical!(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormali
         end
         if recanonicalize
             # Restore the gauge on the retained bond support.
-            _precise_canonical!(ψ; renormalize, reduce=false)
+            _precise_canonical!(ψ; renormalize, reduce=false, orth_tol)
         end
     end
     return stats, sliced
 end
 
 function _truncated_state(ψ::DenseIMPS; maxdim, cutoff, truncerr, renormalize,
-                          canonical_input::Bool=false)
+                          canonical_input::Bool=false, orth_tol=nothing)
     # Canonicalization and slicing replace the tensors and spectra before mutating them.
     trial = iMPS(copy(ψ.Γ), copy(ψ.λ), ψ.n)
     if canonical_input
-        stats, sliced = _truncate_canonical!(trial; maxdim, cutoff, truncerr, renormalize)
+        stats, sliced = _truncate_canonical!(trial; maxdim, cutoff, truncerr, renormalize, orth_tol)
         return trial, stats, 0.0, sliced
     end
-    stats, lognorm, sliced = _canonical_truncate!(trial; maxdim, cutoff, truncerr, renormalize)
+    stats, lognorm, sliced = _canonical_truncate!(trial; maxdim, cutoff, truncerr, renormalize, orth_tol)
     return trial, stats, lognorm, sliced
 end
 
@@ -896,7 +914,8 @@ function _truncation_summary(stats::AbstractVector{BondStat}; path::Symbol=:gene
 end
 
 """
-    truncate!(ψ::iMPS, χ; cutoff=SVDTOL, truncerr=0.0, renormalize=true, return_stats=false)
+    truncate!(ψ::iMPS, χ; cutoff=SVDTOL, truncerr=0.0, renormalize=true,
+              return_stats=false, orth_tol=nothing)
 
 Truncate every bond of `ψ` to at most `χ` Schmidt values, treating all bonds
 alike.
@@ -910,6 +929,13 @@ truncating gives the tiled truncated two-site state.
 
 The state is updated only after truncation and canonicalization succeed.
 
+`orth_tol` sets the tolerance on the left and right orthonormalization
+residuals (Frobenius norm of the change in the normalized seam factor per
+sweep). With `nothing`, the sweeps target `1e-13` and may accept a residual
+up to `1e-10` after stalling or reaching the sweep cap. With a finite positive
+tolerance, failure to meet it within the sweep budget raises
+`CanonicalFormError`. This tolerance is separate from the Schmidt cutoff.
+
 Returns `ψ`, or `(ψ, stats)` with `return_stats=true`; `stats` has fields
 `bond_stats`, `max_discarded_weight`, `kept_dims` and `num_saturated`.
 
@@ -921,10 +947,12 @@ length.(psi.λ)      # [2, 2]
 ```
 """
 function truncate!(ψ::iMPS, χ::Integer; cutoff::Real=SVDTOL, truncerr::Real=0.0,
-                   renormalize::Bool=true, return_stats::Bool=false)
+                   renormalize::Bool=true, return_stats::Bool=false,
+                   orth_tol::Union{Nothing,Real}=nothing)
     ψ isa DenseIMPS || throw(ArgumentError("truncate! supports dense iMPS states"))
     _validate_mpo_truncation(χ, cutoff, truncerr)
-    trial, stats, _ = _truncated_state(ψ; maxdim=χ, cutoff, truncerr, renormalize)
+    _validate_orth_tol(orth_tol)
+    trial, stats, _ = _truncated_state(ψ; maxdim=χ, cutoff, truncerr, renormalize, orth_tol)
     ψ.Γ .= trial.Γ
     ψ.λ .= trial.λ
     return return_stats ? (ψ, _truncation_summary(stats)) : ψ
@@ -950,7 +978,7 @@ function _check_mpo_state(ψ::iMPS, W::iMPO)
 end
 
 """
-    apply!(ψ, W::iMPO; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, recanonicalize=true, return_stats=false, structured=true)
+    apply!(ψ, W::iMPO; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, recanonicalize=true, return_stats=false, structured=true, orth_tol=nothing)
 
 Apply the infinite MPO `W` to `ψ` in place and truncate.
 
@@ -959,7 +987,8 @@ The cell length of `ψ` must be a multiple of `W.n`. Each stored tensor
 after which the state is brought to exact canonical form and every bond keeps
 its own largest Schmidt values, as in [`truncate!`](@ref): at most `maxdim`,
 with discarded weight at most `truncerr` when `truncerr > 0`, and none below
-`cutoff`.
+`cutoff`. `orth_tol` controls the orthonormalization sweeps as in
+[`truncate!`](@ref).
 
 `W` need not be unitary: imaginary-time layers and projectors work. With
 `renormalize=true` (the default) the result is normalized.
@@ -1008,9 +1037,11 @@ apply!(psi, W; maxdim=16)
 """
 function apply!(ψ::iMPS, W::iMPO; maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL,
                 truncerr::Real=0.0, renormalize::Bool=true, recanonicalize::Bool=true,
-                return_stats::Bool=false, structured::Bool=true)
+                return_stats::Bool=false, structured::Bool=true,
+                orth_tol::Union{Nothing,Real}=nothing)
+    _validate_orth_tol(orth_tol)
     stats, path = _apply_mpo!(ψ, W; maxdim, cutoff, truncerr, renormalize, recanonicalize,
-                              normalize_cells=true, structured)
+                              normalize_cells=true, structured, orth_tol)
     return return_stats ? (ψ, _truncation_summary(stats; path)) : ψ
 end
 
@@ -1085,17 +1116,18 @@ end
 # an unregauged truncated state (used inside `evolve!`, where the next application
 # canonicalizes anyway).
 function _apply_mpo!(ψ::iMPS, W::iMPO; maxdim, cutoff, truncerr, renormalize, recanonicalize,
-                     normalize_cells::Bool, structured::Bool=true, snapshot=nothing)
+                     normalize_cells::Bool, structured::Bool=true, snapshot=nothing, orth_tol=nothing)
     _validate_mpo_truncation(maxdim, cutoff, truncerr)
     _check_mpo_state(ψ, W)
     structure = structured ? _applicable_controlled_structure(ψ, W, renormalize) : nothing
     res = isnothing(structure) ? nothing :
-        _apply_controlled(ψ, structure; maxdim, cutoff, truncerr, renormalize, recanonicalize)
+        _apply_controlled(ψ, structure; maxdim, cutoff, truncerr, renormalize,
+                          recanonicalize, orth_tol)
     if isnothing(res)
         path = :generic
         trial = _contract_mpo(ψ, W)
         stats, lognorm, sliced = _canonical_truncate!(trial; maxdim, cutoff, truncerr, renormalize,
-                                                      recanonicalize)
+                                                      recanonicalize, orth_tol)
     else
         path = :controlled
         trial, stats, lognorm, sliced = res
@@ -1106,7 +1138,7 @@ function _apply_mpo!(ψ::iMPS, W::iMPO; maxdim, cutoff, truncerr, renormalize, r
         if sliced
             snapshot.Γ .= trial.Γ
             snapshot.λ .= trial.λ
-            _precise_canonical!(snapshot; renormalize, reduce=false)
+            _precise_canonical!(snapshot; renormalize, reduce=false, orth_tol)
         else
             _copy_imps_state!(snapshot, trial)
         end
@@ -1201,9 +1233,9 @@ end
 # Accept a merged boundary MPO only if it is no larger than the parts. In time order
 # `last_mpo` (end of one step) acts before `first_mpo` (start of the next), so the merged
 # operator is first_mpo · last_mpo.
-function _merged_boundary(last_mpo::iMPO, first_mpo::iMPO)
+function _merged_boundary(last_mpo::iMPO, first_mpo::iMPO; orth_tol=nothing)
     last_mpo.n == first_mpo.n || return nothing
-    merged = mpo_multiply(first_mpo, last_mpo; compress=true)
+    merged = mpo_multiply(first_mpo, last_mpo; compress=true, orth_tol)
     bound = max.(bonddims(last_mpo), bonddims(first_mpo))
     merged.n == last_mpo.n && all(bonddims(merged) .<= bound) || return nothing
     structure = _merged_structure(_valid_structure(first_mpo), _valid_structure(last_mpo))
@@ -1211,7 +1243,7 @@ function _merged_boundary(last_mpo::iMPO, first_mpo::iMPO)
 end
 
 """
-    evolve!(ψ, mpos::AbstractVector{<:iMPO}, steps; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, merge=true, return_stats=false, structured=true, observe=nothing, every=1)
+    evolve!(ψ, mpos::AbstractVector{<:iMPO}, steps; maxdim=MAXDIM, cutoff=SVDTOL, truncerr=0.0, renormalize=true, merge=true, return_stats=false, structured=true, observe=nothing, every=1, orth_tol=nothing)
 
 Apply the MPO sequence `mpos` (one Trotter step, e.g. from
 [`trotter_mpos`](@ref)) `steps` times with [`apply!`](@ref), truncating after
@@ -1220,6 +1252,9 @@ application does that); the returned state is canonical and normalized. Each
 application is transactional, so if one throws (e.g.
 [`MPOAnnihilationError`](@ref)), `ψ` holds the state after the last
 successful application.
+
+`orth_tol` is the orthonormalization tolerance of [`truncate!`](@ref) and
+applies to each MPO update, observed snapshot, and half-step compression.
 
 Half-step merging: with `merge=true` and `steps > 1`, the last MPO of a step
 and the first MPO of the next step (for `:second`, `U_A(dt/2) U_A(dt/2)`) are
@@ -1269,19 +1304,21 @@ evolve!(psi, U, 20; maxdim=16)
 function evolve!(ψ::iMPS, mpos::AbstractVector{<:iMPO}, steps::Integer;
                  maxdim::Integer=MAXDIM, cutoff::Real=SVDTOL, truncerr::Real=0.0,
                  renormalize::Bool=true, merge::Bool=true, return_stats::Union{Bool,Symbol}=false,
-                 structured::Bool=true, observe=nothing, every::Integer=1)
+                 structured::Bool=true, observe=nothing, every::Integer=1,
+                 orth_tol::Union{Nothing,Real}=nothing)
     steps >= 0 || throw(ArgumentError("steps must be non-negative"))
     _validate_mpo_truncation(maxdim, cutoff, truncerr)
+    _validate_orth_tol(orth_tol)
     foreach(W -> _check_mpo_state(ψ, W), mpos)
     k = length(mpos)
-    merged = merge && k >= 2 && steps >= 2 ? _merged_boundary(mpos[end], mpos[1]) : nothing
+    merged = merge && k >= 2 && steps >= 2 ? _merged_boundary(mpos[end], mpos[1]; orth_tol) : nothing
     return _evolve_sequence!(ψ, mpos, merged, steps; maxdim, cutoff, truncerr, renormalize,
-                             return_stats, structured, observe, every)
+                             return_stats, structured, observe, every, orth_tol)
 end
 
 # `merged`: precomputed boundary MPO (or nothing for no merging); see `evolve!`.
 function _evolve_sequence!(ψ, mpos, merged, steps; maxdim, cutoff, truncerr, renormalize,
-                           return_stats, structured, observe=nothing, every=1)
+                           return_stats, structured, observe=nothing, every=1, orth_tol=nothing)
     stats, interval = _evolution_recorders(return_stats, observe, every; detailed_observation=true)
     isnothing(observe) || observe(ψ, 0, nothing)
     if isempty(mpos)
@@ -1301,7 +1338,7 @@ function _evolve_sequence!(ψ, mpos, merged, steps; maxdim, cutoff, truncerr, re
         # Intermediate truncations are only renormalized: the next application
         # recanonicalizes anyway. The final state is returned in canonical form.
         st, path = _apply_mpo!(state, W; maxdim, cutoff, truncerr, renormalize, recanonicalize=last,
-                               normalize_cells=false, structured, snapshot)
+                               normalize_cells=false, structured, snapshot, orth_tol)
         if !isnothing(total) || !isnothing(interval)
             update = detail ? _truncation_summary(st; path) : nothing
             _record_evolution!(total, st, maxdim, update, path === :controlled)
@@ -1474,7 +1511,8 @@ function _imaginary_trial_mpos(prep::_ImagPrep, dτ)
     return trotter_mpos(shifted, dτ; evolution=:imaginary, n=prep.n, check=false, d=prep.d)
 end
 
-function _energy_fix_core!(ψ, prep::_ImagPrep, χ; target, tol, alpha, maxstep, cutoff, structured=true)
+function _energy_fix_core!(ψ, prep::_ImagPrep, χ; target, tol, alpha, maxstep, cutoff,
+                           structured=true, orth_tol=nothing)
     observables = collect(_energy_observables(ψ, prep.terms, prep.n))
     measure(state) = _mean_local_expectation(state, observables)
     residual = measure(ψ) - target
@@ -1488,7 +1526,7 @@ function _energy_fix_core!(ψ, prep::_ImagPrep, χ; target, tol, alpha, maxstep,
     while steps < maxstep && isfinite(dτ) && !iszero(dτ)
         Ws = _imaginary_trial_mpos(prep, dτ)
         _evolve_sequence!(trial, Ws, nothing, 1; maxdim=χ, cutoff, truncerr=0.0,
-                          renormalize=true, return_stats=false, structured)
+                          renormalize=true, return_stats=false, structured, orth_tol)
         attempted = measure(trial) - target
         steps += 1
         if abs(attempted) < abs(residual)
@@ -1505,7 +1543,7 @@ function _energy_fix_core!(ψ, prep::_ImagPrep, χ; target, tol, alpha, maxstep,
 end
 
 """
-    energy_fix!(ψ, terms_or_layers, χ; target, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n, cutoff=SVDTOL, structured=true)
+    energy_fix!(ψ, terms_or_layers, χ; target, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n, cutoff=SVDTOL, structured=true, orth_tol=nothing)
 
 Move the energy per site of `ψ` toward `target` with short imaginary-time
 steps built as layer MPOs from site-dependent terms.
@@ -1527,16 +1565,19 @@ bounded.
 
 Returns `(converged, residual, steps)`. The residual is `E − target` for
 the state left in `ψ`, and `steps` counts the trials.
+`orth_tol` controls orthonormalization during each trial as in
+[`truncate!`](@ref), and `tol` controls the energy residual.
 """
 function energy_fix!(ψ::iMPS, terms_or_layers, χ::Integer; target::Real, tol::Real=1e-6,
                      alpha::Real=0.1, maxstep::Integer=50, n::Integer=ψ.n,
                      cutoff::Real=SVDTOL, d::Union{Nothing,Integer}=nothing,
-                     structured::Bool=true)
+                     structured::Bool=true, orth_tol::Union{Nothing,Real}=nothing)
+    _validate_orth_tol(orth_tol)
     dd = isnothing(d) ? size(ψ.Γ[1], 2) : d
     n > 0 || throw(ArgumentError("unit-cell length must be positive"))
     prep = _prepare_imaginary(terms_or_layers; n, d=dd)
     _validate_energy_fix_args(ψ, χ, prep; target, tol, alpha, maxstep, cutoff)
-    return _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff, structured)
+    return _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff, structured, orth_tol)
 end
 
 #---------------------------------------------------------------------------------------------------

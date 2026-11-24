@@ -162,6 +162,26 @@ end
     @test all(s -> s.discarded_weight <= 1e-2, st.bond_stats)
 end
 
+@testset "Explicit orthonormalization tolerance is strict" begin
+    # Right-isometric tensor with an almost closed transfer gap. The identity
+    # left seed moves by about 5e-12 per sweep, above the requested tolerance.
+    p, q = 1e-11, 2e-11
+    B = zeros(2, 2, 2)
+    B[:, 1, :] = Diagonal([sqrt(1 - p), sqrt(1 - q)])
+    B[:, 2, :] = [0 sqrt(p); sqrt(q) 0]
+    ψ = iMPS([B], [fill(inv(sqrt(2.0)), 2)], 1)
+    saved = deepcopy(ψ)
+    W = iMPO([reshape(Matrix{Float64}(I, 2, 2), 1, 2, 2, 1)])
+
+    @test_throws CanonicalFormError truncate!(ψ, 2; orth_tol=1e-13)
+    @test_throws CanonicalFormError evolve!(ψ, [W], 1; orth_tol=1e-13)
+    @test_throws CanonicalFormError project!(ψ, 2; orth_tol=1e-13)
+    @test_throws CanonicalFormError scarfinder!(ψ, [W, W], 2, 1; nstep=2,
+                                               refine=false, orth_tol=1e-13)
+    @test_throws ArgumentError apply!(ψ, W; orth_tol=NaN)
+    @test ψ.Γ == saved.Γ && ψ.λ == saved.λ
+end
+
 @testset "site-dependent energy density" begin
     rng = MersenneTwister(3)
     hA = _controlled((a, b) -> _rand_hermitian(rng, 2))

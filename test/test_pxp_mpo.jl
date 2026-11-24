@@ -176,3 +176,33 @@ end
     loss, err = run(16)
     @test loss == r16.loss
 end
+
+@testset "ScarFinder orthonormalization near the sweep cap (#8)" begin
+    h = PXPMPO.h(1.0)
+    layers = [[(h, 2, 4)], [(h, 1, 3)]]
+    target = 0.7966094608463845
+    threads = BLAS.get_num_threads()
+    try
+        BLAS.set_num_threads(1)
+        U = trotter_mpos(layers, 0.05; n=2, gate_map=G -> PXPMPO.P3 * G)
+        for orth_tol in (nothing, 1e-11)
+            ψ = product_iMPS([ComplexF64[1, 0], ComplexF64[1, 0]])
+            for _ in 1:100
+                evolve!(ψ, U, 2; maxdim=16, cutoff=1e-12, orth_tol)
+                truncate!(ψ, 2; orth_tol)
+                energy_fix!(ψ, layers, 2; target, tol=1e-3, n=2, orth_tol)
+            end
+            @test length.(ψ.λ) == [2, 2]
+            @test inner_product(ψ) ≈ 1 atol=1e-10
+            @test abs(energy_density(ψ, reduce(vcat, layers)) - target) <= 1e-3
+            for i in 1:ψ.n
+                B = ψ.Γ[i]
+                left = Diagonal(abs2.(ψ.λ[mod1(i - 1, ψ.n)]))
+                right = Diagonal(abs2.(ψ.λ[i]))
+                @test sum(B[:, s, :]' * left * B[:, s, :] for s in axes(B, 2)) ≈ right atol=1e-10
+            end
+        end
+    finally
+        BLAS.set_num_threads(threads)
+    end
+end

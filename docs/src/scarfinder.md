@@ -88,6 +88,8 @@ with `constraint_leakage(ψ, Blockade())`.
 - `maxdim=MAXDIM`: bond dimension the evolution may grow into before the
   projection to `χ`; typically larger than `χ`.
 - `cutoff=SVDTOL`: singular-value cutoff of the evolution and the projection.
+- `orth_tol=nothing` sets the orthonormalization tolerance for MPO evolution,
+  Schmidt truncation and imaginary-time energy correction. See [`truncate!`](@ref).
 - `terms`, `target=nothing`, `tol=1e-6`, `alpha=0.1`, `maxstep=50`, `n`: energy
   correction, see [`energy_fix!`](@ref).
 - `refine=true`, `refine_step=100`, `refine_U=U` (`refine_dt=dt/10` in the

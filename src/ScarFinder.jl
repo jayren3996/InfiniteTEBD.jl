@@ -278,9 +278,11 @@ end
 _term_period(ψ::iMPS, U) = U isa AbstractVector{<:iMPO} && !isempty(U) ? first(U).n : ψ.n
 
 # Validate everything `project!` needs before any state changes.
-function _projection_setup(ψ::iMPS, χ::Integer; cutoff, terms, target, tol, alpha, maxstep, n)
+function _projection_setup(ψ::iMPS, χ::Integer; cutoff, terms, target, tol, alpha, maxstep, n,
+                           orth_tol)
     ψ isa DenseIMPS || throw(ArgumentError("ScarFinder supports dense iMPS states"))
     _validate_mpo_truncation(χ, cutoff, 0.0)
+    _validate_orth_tol(orth_tol)
     n > 0 || throw(ArgumentError("unit-cell length must be positive"))
     if isnothing(terms)
         isnothing(target) && return nothing
@@ -333,12 +335,12 @@ function _isolated_transfer_fixed_point(ψ::DenseIMPS)
     return info.converged >= 1 && abs(first(values)) < 1 - sqrt(tol)
 end
 
-function _project!(ψ::DenseIMPS, χ::Integer, prep; cutoff, target, tol, alpha, maxstep,
+function _project!(ψ::DenseIMPS, χ::Integer, prep; cutoff, target, tol, alpha, maxstep, orth_tol,
                    canonical_input::Bool=false, report::Bool=true)
     reuse = canonical_input && _well_separated_schmidt_cut(ψ, χ, cutoff) &&
             _isolated_transfer_fixed_point(ψ)
     trial, _, lognorm, sliced = _truncated_state(ψ; maxdim=χ, cutoff, truncerr=0.0,
-                                                renormalize=true, canonical_input=reuse)
+                                                renormalize=true, canonical_input=reuse, orth_tol)
     loss = if report && !(reuse && !sliced)
         lognorm_site = lognorm / ψ.n
         reference = if abs(lognorm_site) <= _ORTH_TOL
@@ -356,18 +358,19 @@ function _project!(ψ::DenseIMPS, χ::Integer, prep; cutoff, target, tol, alpha,
     ψ.Γ .= trial.Γ
     ψ.λ .= trial.λ
     isnothing(prep) && return report ? (; loss, energy_error=nothing, converged=true) : nothing
-    r = _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff)
+    r = _energy_fix_core!(ψ, prep, χ; target, tol, alpha, maxstep, cutoff, orth_tol)
     return report ? (; loss, energy_error=r.residual, converged=r.converged) : nothing
 end
 
 """
-    project!(ψ, χ; cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n)
+    project!(ψ, χ; cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n=ψ.n, orth_tol=nothing)
 
 Project `ψ` onto the manifold of bond dimension `χ` at energy density `target`:
 [`truncate!`](@ref) every bond to `χ`, then, if `target` is given, correct the
 energy with [`energy_fix!`](@ref) using the terms `(h, i, j)` (period `n`).
 Supplied terms are validated before updating the state. Their spectral bounds
 are only prepared when `target` is supplied.
+`orth_tol` is passed to the Schmidt truncation and the imaginary-time updates.
 
 Returns `(loss, energy_error, converged)`. `loss = −log F_site` compares the
 input and truncated states after accounting for their norms, before energy correction.
@@ -378,13 +381,13 @@ This is the bond-dimension projection used by [`scarfinder_step!`](@ref) for den
 """
 function project!(ψ::iMPS, χ::Integer; cutoff::Real=SVDTOL, terms=nothing,
                   target::Union{Nothing,Real}=nothing, tol::Real=1e-6, alpha::Real=0.1,
-                  maxstep::Integer=50, n::Integer=ψ.n)
-    prep = _projection_setup(ψ, χ; cutoff, terms, target, tol, alpha, maxstep, n)
-    return _project!(ψ, χ, prep; cutoff, target, tol, alpha, maxstep)
+                  maxstep::Integer=50, n::Integer=ψ.n, orth_tol::Union{Nothing,Real}=nothing)
+    prep = _projection_setup(ψ, χ; cutoff, terms, target, tol, alpha, maxstep, n, orth_tol)
+    return _project!(ψ, χ, prep; cutoff, target, tol, alpha, maxstep, orth_tol)
 end
 
 """
-    scarfinder_step!(ψ, U, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n)
+    scarfinder_step!(ψ, U, χ; nstep=10, maxdim=MAXDIM, cutoff=SVDTOL, terms=nothing, target=nothing, tol=1e-6, alpha=0.1, maxstep=50, n, orth_tol=nothing)
     scarfinder_step!(ψ, U, h, χ; …)
     scarfinder_step!(ψ, h, dt, χ; trotter=nothing, layers=nothing, …)
 
@@ -410,6 +413,8 @@ normalized Schmidt basis when both the cut and the dominant transfer fixed
 point are well separated. A cut still
 restores the gauge on the retained support. The tensor gauge and roundoff
 can differ from separate calls to `evolve!` and `project!`.
+`orth_tol` controls orthonormalization during projection and built-in MPO
+evolution. Local gate evolution uses its own canonicalization.
 """
 scarfinder_step!(ψ::iMPS, U, χ::Integer; kwargs...) =
     _prepare_scarfinder_step(ψ, U, χ; kwargs...)(ψ)
@@ -418,30 +423,35 @@ function _prepare_scarfinder_step(ψ::iMPS, U, χ::Integer, prepare_merge::Bool=
                                   nstep::Integer=10, maxdim::Integer=MAXDIM,
                                   cutoff::Real=SVDTOL, terms=nothing,
                                   target::Union{Nothing,Real}=nothing, tol::Real=1e-6, alpha::Real=0.1,
-                                  maxstep::Integer=50, n::Integer=_term_period(ψ, U))
-    prep = _projection_setup(ψ, χ; cutoff, terms, target, tol, alpha, maxstep, n)
+                                  maxstep::Integer=50, n::Integer=_term_period(ψ, U),
+                                  orth_tol::Union{Nothing,Real}=nothing)
+    prep = _projection_setup(ψ, χ; cutoff, terms, target, tol, alpha, maxstep, n, orth_tol)
     _warn_scarfinder_nstep(nstep)
     evolution = _evolution(ψ, U)
     # Only the built-in MPO method guarantees the final Schmidt gauge.
-    canonical_input = evolution isa Vector{<:iMPO} && !isempty(evolution) &&
+    builtin_mpo = evolution isa AbstractVector{<:iMPO} &&
         which(evolve!, (typeof(ψ), typeof(evolution), typeof(nstep))) ===
         which(evolve!, (iMPS, AbstractVector{<:iMPO}, Integer))
+    canonical_input = builtin_mpo && evolution isa Vector && !isempty(evolution)
     use_prepared = prepare_merge && canonical_input && nstep >= 2 && length(evolution) >= 2
     merged = if use_prepared
         _validate_mpo_truncation(maxdim, cutoff, 0.0)
         foreach(W -> _check_mpo_state(ψ, W), evolution)
-        _merged_boundary(last(evolution), first(evolution))
+        _merged_boundary(last(evolution), first(evolution); orth_tol)
     else
         nothing
     end
     return function (state, report::Bool=true)
         if use_prepared
             _evolve_sequence!(state, evolution, merged, nstep; maxdim, cutoff, truncerr=0.0,
-                              renormalize=true, return_stats=false, structured=true)
+                              renormalize=true, return_stats=false, structured=true, orth_tol)
+        elseif builtin_mpo
+            evolve!(state, evolution, nstep; maxdim, cutoff, orth_tol)
         else
             evolve!(state, evolution, nstep; maxdim, cutoff)
         end
-        return _project!(state, χ, prep; cutoff, target, tol, alpha, maxstep, canonical_input, report)
+        return _project!(state, χ, prep; cutoff, target, tol, alpha, maxstep,
+                         canonical_input, report, orth_tol)
     end
 end
 
